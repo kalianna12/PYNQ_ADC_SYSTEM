@@ -1,48 +1,57 @@
 module spi_master_128b #(
     parameter integer CLK_DIV_HALF = 625
 ) (
-    input  wire        clk,
-    input  wire        rst,
-    input  wire        start,
+    input  wire          clk,
+    input  wire          rst,
+    input  wire          start,
     input  wire [1023:0] tx_frame,
-    input  wire        miso,
-    output reg         mosi,
-    output reg         sclk,
-    output reg         cs_n,
+    input  wire          miso,
+    output reg           mosi,
+    output reg           sclk,
+    output reg           cs_n,
     output reg  [1023:0] rx_frame,
-    output reg         busy,
-    output reg         done
+    output reg           busy,
+    output reg           done
 );
 
     reg [15:0] div_count = 16'd0;
-    reg [7:0] byte_index = 8'd0;
-    reg [2:0] bit_index = 3'd7;
+    reg [7:0]  byte_index = 8'd0;
+    reg [2:0]  bit_index = 3'd7;
+
+    // Latch tx_frame at the beginning of one SPI transaction.
+    // This prevents tx_frame from changing in the middle of a 128-byte transfer.
+    reg [1023:0] tx_latched = 1024'd0;
 
     always @(posedge clk) begin
         if (rst) begin
-            mosi <= 1'b0;
-            sclk <= 1'b0;
-            cs_n <= 1'b1;
-            rx_frame <= 1024'd0;
-            busy <= 1'b0;
-            done <= 1'b0;
-            div_count <= 16'd0;
+            mosi       <= 1'b0;
+            sclk       <= 1'b0;
+            cs_n       <= 1'b1;
+            rx_frame   <= 1024'd0;
+            tx_latched <= 1024'd0;
+            busy       <= 1'b0;
+            done       <= 1'b0;
+            div_count  <= 16'd0;
             byte_index <= 8'd0;
-            bit_index <= 3'd7;
+            bit_index  <= 3'd7;
         end else begin
             done <= 1'b0;
 
             if (!busy) begin
-                sclk <= 1'b0;
-                cs_n <= 1'b1;
-                div_count <= 16'd0;
+                sclk       <= 1'b0;
+                cs_n       <= 1'b1;
+                div_count  <= 16'd0;
                 byte_index <= 8'd0;
-                bit_index <= 3'd7;
+                bit_index  <= 3'd7;
 
                 if (start) begin
-                    busy <= 1'b1;
-                    cs_n <= 1'b0;
-                    rx_frame <= 1024'd0;
+                    busy       <= 1'b1;
+                    cs_n       <= 1'b0;
+                    rx_frame   <= 1024'd0;
+                    tx_latched <= tx_frame;
+
+                    // SPI mode 0:
+                    // MOSI is prepared before the first rising edge.
                     mosi <= tx_frame[0*8 + 7];
                 end
             end else begin
@@ -50,9 +59,11 @@ module spi_master_128b #(
                     div_count <= 16'd0;
 
                     if (sclk == 1'b0) begin
+                        // Rising edge: sample MISO.
                         sclk <= 1'b1;
                         rx_frame[byte_index*8 + bit_index] <= miso;
                     end else begin
+                        // Falling edge: update MOSI for the next bit.
                         sclk <= 1'b0;
 
                         if (bit_index == 3'd0) begin
@@ -63,12 +74,12 @@ module spi_master_128b #(
                                 done <= 1'b1;
                             end else begin
                                 byte_index <= byte_index + 8'd1;
-                                bit_index <= 3'd7;
-                                mosi <= tx_frame[(byte_index + 8'd1)*8 + 7];
+                                bit_index  <= 3'd7;
+                                mosi       <= tx_latched[(byte_index + 8'd1)*8 + 7];
                             end
                         end else begin
                             bit_index <= bit_index - 3'd1;
-                            mosi <= tx_frame[byte_index*8 + (bit_index - 3'd1)];
+                            mosi      <= tx_latched[byte_index*8 + (bit_index - 3'd1)];
                         end
                     end
                 end else begin

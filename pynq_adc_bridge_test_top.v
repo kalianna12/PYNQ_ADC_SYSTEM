@@ -1,7 +1,7 @@
 module pynq_adc_bridge_test_top #(
     parameter integer CLKS_PER_BIT = 1085,
-    parameter integer DDS_SPI_CLK_DIV_HALF = 625,
-    parameter integer DDS_SPI_PERIOD_CLKS = 2500000
+    parameter integer DDS_SPI_CLK_DIV_HALF = 2500,
+    parameter integer DDS_SPI_PERIOD_CLKS = 12500000
 ) (
     input  wire clk_125m,
 
@@ -10,9 +10,9 @@ module pynq_adc_bridge_test_top #(
 
     // Debug LEDs on PYNQADC board.
     // led0: heartbeat
-    // led1: blinks when a 128-byte SPI transaction to PYNQDDS completes
-    // led2: reserved / currently off
-    // led3: blinks when UART receives a byte or a valid DDS->ADC frame is received
+    // led1: toggle on each completed 128-byte SPI transaction to PYNQDDS
+    // led2: toggle on successfully parsed new text from PYNQDDS
+    // led3: pulse on local UART RX byte (including CR/LF)
     output wire led0,
     output wire led1,
     output wire led2,
@@ -49,22 +49,39 @@ module pynq_adc_bridge_test_top #(
     // ============================================================
     // Debug LEDs
     // ============================================================
+    localparam [23:0] LED_BLINK_TICKS = 24'd12_500_000;
+
     reg [26:0] heartbeat_cnt = 27'd0;
-    reg [23:0] spi_ok_blink_cnt = 24'd0;
-    reg [23:0] rx_blink_cnt = 24'd0;
+    reg        dds_spi_done_toggle = 1'b0;
+    reg        dds_text_toggle = 1'b0;
+    reg [23:0] uart_rx_blink_cnt = 24'd0;
 
     always @(posedge clk_125m) begin
         if (rst) begin
             heartbeat_cnt <= 27'd0;
+            dds_spi_done_toggle <= 1'b0;
+            dds_text_toggle <= 1'b0;
+            uart_rx_blink_cnt <= 24'd0;
         end else begin
             heartbeat_cnt <= heartbeat_cnt + 27'd1;
+
+            if (dds_spi_done)
+                dds_spi_done_toggle <= ~dds_spi_done_toggle;
+
+            if (dds_frame_valid && dds_seq != 32'd0 && dds_seq != last_dds_seq)
+                dds_text_toggle <= ~dds_text_toggle;
+
+            if (uart_rx_valid)
+                uart_rx_blink_cnt <= LED_BLINK_TICKS;
+            else if (uart_rx_blink_cnt != 24'd0)
+                uart_rx_blink_cnt <= uart_rx_blink_cnt - 24'd1;
         end
     end
 
     assign led0 = heartbeat_cnt[26];
-    assign led1 = (spi_ok_blink_cnt != 24'd0);
-    assign led2 = 1'b0;
-    assign led3 = (rx_blink_cnt != 24'd0);
+    assign led1 = dds_spi_done_toggle;
+    assign led2 = dds_text_toggle;
+    assign led3 = (uart_rx_blink_cnt != 24'd0);
 
     // ============================================================
     // UART line input from PC. Type text + Enter, then send to DDS.
@@ -178,30 +195,6 @@ module pynq_adc_bridge_test_top #(
         .text_len(dds_text_len),
         .text_bytes(dds_text_bytes)
     );
-
-    // LED debug pulses. At 125 MHz, 12_500_000 cycles is about 100 ms.
-    localparam [23:0] LED_BLINK_TICKS = 24'd12_500_000;
-
-    wire any_rx_event = uart_rx_valid || (dds_frame_valid && dds_seq != 32'd0);
-
-    always @(posedge clk_125m) begin
-        if (rst) begin
-            spi_ok_blink_cnt <= 24'd0;
-            rx_blink_cnt <= 24'd0;
-        end else begin
-            if (dds_spi_done) begin
-                spi_ok_blink_cnt <= LED_BLINK_TICKS;
-            end else if (spi_ok_blink_cnt != 24'd0) begin
-                spi_ok_blink_cnt <= spi_ok_blink_cnt - 24'd1;
-            end
-
-            if (any_rx_event) begin
-                rx_blink_cnt <= LED_BLINK_TICKS;
-            end else if (rx_blink_cnt != 24'd0) begin
-                rx_blink_cnt <= rx_blink_cnt - 24'd1;
-            end
-        end
-    end
 
     reg [31:0] last_dds_seq = 32'd0;
     reg [831:0] print_text = 832'd0;
