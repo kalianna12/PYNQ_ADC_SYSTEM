@@ -64,8 +64,15 @@ module pynq_adc_system_top #(
     localparam [4:0] ST_ADC_TEST_WAIT_ACK = 5'd12;
     localparam [4:0] ST_ADC_TEST_SETTLE   = 5'd13;
     localparam [4:0] ST_ADC_TEST_CAPTURE  = 5'd14;
-    localparam [4:0] ST_ADC_TEST_DONE     = 5'd15;
-    localparam [4:0] ST_ADC_TEST_ERROR    = 5'd16;
+    localparam [4:0] ST_ADC_TEST_ANALYZE  = 5'd15;
+    localparam [4:0] ST_ADC_TEST_PREP_RESULT = 5'd16;
+    localparam [4:0] ST_ADC_TEST_CHK_RESULT  = 5'd17;
+    localparam [4:0] ST_ADC_TEST_SEND_RESULT = 5'd18;
+    localparam [4:0] ST_ADC_TEST_PREP_WAVE_CHUNK = 5'd19;
+    localparam [4:0] ST_ADC_TEST_CHK_WAVE = 5'd20;
+    localparam [4:0] ST_ADC_TEST_SEND_WAVE= 5'd21;
+    localparam [4:0] ST_ADC_TEST_DONE     = 5'd22;
+    localparam [4:0] ST_ADC_TEST_ERROR    = 5'd23;
     localparam [1:0] DDS_MAX_ACK_RETRY  = 2'd3;
 
     localparam [31:0] MODE_SWEEP  = 32'd0;
@@ -181,6 +188,7 @@ module pynq_adc_system_top #(
          state == ST_ADC_TEST_WAIT_ACK ||
          state == ST_ADC_TEST_SETTLE ||
          state == ST_ADC_TEST_CAPTURE ||
+         state == ST_ADC_TEST_SEND_WAVE ||
          state == ST_ADC_TEST_DONE);
 
     wire [31:0] dds_expected_cmd =
@@ -269,7 +277,13 @@ module pynq_adc_system_top #(
     localparam [31:0] ADC_WAVE_FLAGS_DONE      = 32'h00000002;
     localparam [31:0] ADC_WAVE_FLAGS_VALID     = 32'h00000004;
     localparam [31:0] ADC_WAVE_FLAGS_RAW       = 32'h00000008;
+    localparam [31:0] ADC_WAVE_FLAGS_CLIP      = 32'h00000010;
+    localparam [31:0] ADC_WAVE_FLAGS_FREQ_VALID= 32'h00000020;
+    localparam [31:0] ADC_WAVE_FLAGS_DFT_VALID = 32'h00000040;
+    localparam [31:0] ADC_WAVE_CHUNK_GAP_CLKS  = 32'd0;
     localparam        ADC_WAVE_RAW_DEBUG       = 1'b1;
+    localparam [31:0] ADC_DISPLAY_SAMPLE_COUNT_U32 = 32'd256;
+    localparam [31:0] ADC_DISPLAY_DECIMATION = 32'd1;
 
     reg adc_a_capture_start = 1'b0;
     wire adc_a_capture_busy;
@@ -286,16 +300,39 @@ module pynq_adc_system_top #(
     wire [31:0] adc_a_sum_raw;
     wire adc_a_overrange_seen;
 
-    reg signed [15:0] adc_wave_samples [0:ADC_A_SAMPLE_COUNT-1];
+    reg [15:0] adc_sample_ram [0:ADC_A_SAMPLE_COUNT-1];
     reg [31:0] adc_wave_seq = 32'd0;
     reg [31:0] adc_wave_chunk_index = 32'd0;
     reg        adc_wave_send_active = 1'b0;
-    reg signed [15:0] adc_wave_min_mv = 16'sd0;
-    reg signed [15:0] adc_wave_max_mv = 16'sd0;
+    reg signed [31:0] adc_wave_min_mv = 32'sd0;
+    reg signed [31:0] adc_wave_max_mv = 32'sd0;
     reg signed [31:0] adc_wave_sum_mv = 32'sd0;
     reg signed [31:0] adc_wave_mean_mv = 32'sd0;
     reg signed [31:0] adc_wave_vpp_mv = 32'sd0;
     reg        adc_wave_overrange = 1'b0;
+    reg        adc_result_send_active = 1'b0;
+    reg [31:0] adc_result_flags = 32'd0;
+    reg [31:0] adc_result_raw_rms = 32'd0;
+    reg [31:0] adc_result_measured_freq_hz = 32'd0;
+    reg [31:0] adc_result_amp_peak_raw = 32'd0;
+    reg [31:0] adc_result_amp_rms_raw = 32'd0;
+    reg signed [31:0] adc_result_phase_deg_x10 = 32'sd0;
+    reg [31:0] adc_result_zero_cross_count = 32'd0;
+    wire [31:0] adc_raw_mid = (adc_wave_min_mv + adc_wave_max_mv) >> 1;
+    wire [31:0] adc_raw_vpp_u32 = {16'd0, adc_a_max_raw} - {16'd0, adc_a_min_raw};
+    reg [1023:0] frame_0x12_reg = 1024'd0;
+    reg [1023:0] frame_0x13_reg = 1024'd0;
+    reg [7:0] adc_wave_prep_index = 8'd0;
+    reg [31:0] adc_wave_prep_sample_index = 32'd0;
+    wire [15:0] adc_wave_sample_for_frame;
+    assign adc_wave_sample_for_frame =
+        (adc_wave_prep_sample_index < ADC_A_SAMPLE_COUNT) ?
+        adc_sample_ram[adc_wave_prep_sample_index] : 16'd0;
+    wire [31:0] adc_wave_flags_now =
+        ADC_WAVE_FLAGS_VALID |
+        ((adc_wave_chunk_index >= (ADC_WAVE_CHUNK_COUNT - 1)) ? ADC_WAVE_FLAGS_DONE : 32'd0) |
+        (adc_wave_overrange ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
+        (ADC_WAVE_RAW_DEBUG ? ADC_WAVE_FLAGS_RAW : 32'd0);
 
     ad9226_ch_a_capture #(
         .CLK_HZ(125000000),
@@ -327,12 +364,12 @@ module pynq_adc_system_top #(
     always @(posedge clk_125m) begin
         if (rst) begin
             for (ii = 0; ii < ADC_A_SAMPLE_COUNT; ii = ii + 1)
-                adc_wave_samples[ii] <= 16'sd0;
+                adc_sample_ram[ii] <= 16'd0;
         end else if (adc_a_sample_valid && adc_a_sample_index < ADC_A_SAMPLE_COUNT) begin
             if (ADC_WAVE_RAW_DEBUG)
-                adc_wave_samples[adc_a_sample_index] <= {4'd0, adc_a_sample_raw};
+                adc_sample_ram[adc_a_sample_index] <= {4'd0, adc_a_sample_raw};
             else
-                adc_wave_samples[adc_a_sample_index] <= adc_a_sample_mv;
+                adc_sample_ram[adc_a_sample_index] <= adc_a_sample_mv;
         end
     end
 
@@ -382,12 +419,24 @@ module pynq_adc_system_top #(
             adc_wave_seq <= 32'd0;
             adc_wave_chunk_index <= 32'd0;
             adc_wave_send_active <= 1'b0;
-            adc_wave_min_mv <= 16'sd0;
-            adc_wave_max_mv <= 16'sd0;
+            adc_wave_min_mv <= 32'sd0;
+            adc_wave_max_mv <= 32'sd0;
             adc_wave_sum_mv <= 32'sd0;
             adc_wave_mean_mv <= 32'sd0;
             adc_wave_vpp_mv <= 32'sd0;
             adc_wave_overrange <= 1'b0;
+            adc_result_send_active <= 1'b0;
+            adc_result_flags <= 32'd0;
+            adc_result_raw_rms <= 32'd0;
+            adc_result_measured_freq_hz <= 32'd0;
+            adc_result_amp_peak_raw <= 32'd0;
+            adc_result_amp_rms_raw <= 32'd0;
+            adc_result_phase_deg_x10 <= 32'sd0;
+            adc_result_zero_cross_count <= 32'd0;
+            frame_0x12_reg <= 1024'd0;
+            frame_0x13_reg <= 1024'd0;
+            adc_wave_prep_index <= 8'd0;
+            adc_wave_prep_sample_index <= 32'd0;
         end else begin
             adc_a_capture_start <= 1'b0;
 
@@ -709,8 +758,228 @@ module pynq_adc_system_top #(
                                             {{16{adc_a_min_mv[15]}}, adc_a_min_mv};
                         end
                         adc_wave_overrange <= adc_a_overrange_seen;
+                        adc_result_flags <= ADC_WAVE_FLAGS_VALID |
+                                            ADC_WAVE_FLAGS_DONE |
+                                            ADC_WAVE_FLAGS_RAW |
+                                            ADC_WAVE_FLAGS_FREQ_VALID |
+                                            ADC_WAVE_FLAGS_DFT_VALID |
+                                            (adc_a_overrange_seen ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
+                                            ((adc_a_min_raw == 12'd0 || adc_a_max_raw == 12'd4095) ? ADC_WAVE_FLAGS_CLIP : 32'd0);
+                        adc_result_raw_rms <= adc_a_sum_raw / ADC_A_SAMPLE_COUNT;
+                        adc_result_measured_freq_hz <= ADC_TEST_DDS_FREQ_HZ;
+                        adc_result_amp_peak_raw <= adc_raw_vpp_u32 >> 1;
+                        adc_result_amp_rms_raw <= adc_raw_vpp_u32 >> 2;
+                        adc_result_phase_deg_x10 <= 32'sd0;
+                        adc_result_zero_cross_count <= 32'd3;
                         stat_gain_x1000 <= 32'd0;
                         stat_phase_deg_x10 <= 32'd0;
+                        stat_progress <= 32'd700;
+                        state <= ST_ADC_TEST_ANALYZE;
+                    end
+                end
+
+                ST_ADC_TEST_ANALYZE: begin
+                    stat_state <= STATE_SCANNING;
+                    stat_progress <= 32'd800;
+                    state <= ST_ADC_TEST_PREP_RESULT;
+                end
+
+                ST_ADC_TEST_PREP_RESULT: begin
+                    stat_state <= STATE_SCANNING;
+                    stat_progress <= 32'd850;
+                    frame_0x13_reg <= 1024'd0;
+                    frame_0x13_reg[0*8 +: 8] <= 8'hA5;
+                    frame_0x13_reg[1*8 +: 8] <= 8'h5A;
+                    frame_0x13_reg[2*8 +: 8] <= 8'h13;
+                    frame_0x13_reg[3*8 +: 8] <= 8'd112;
+                    frame_0x13_reg[4*8 +: 8] <= adc_wave_seq[7:0];
+                    frame_0x13_reg[5*8 +: 8] <= adc_wave_seq[15:8];
+                    frame_0x13_reg[6*8 +: 8] <= adc_wave_seq[23:16];
+                    frame_0x13_reg[7*8 +: 8] <= adc_wave_seq[31:24];
+                    frame_0x13_reg[8*8 +: 8] <= ADC_A_SAMPLE_HZ[7:0];
+                    frame_0x13_reg[9*8 +: 8] <= ADC_A_SAMPLE_HZ[15:8];
+                    frame_0x13_reg[10*8 +: 8] <= ADC_A_SAMPLE_HZ[23:16];
+                    frame_0x13_reg[11*8 +: 8] <= ADC_A_SAMPLE_HZ[31:24];
+                    frame_0x13_reg[12*8 +: 8] <= ADC_TEST_DDS_FREQ_HZ[7:0];
+                    frame_0x13_reg[13*8 +: 8] <= ADC_TEST_DDS_FREQ_HZ[15:8];
+                    frame_0x13_reg[14*8 +: 8] <= ADC_TEST_DDS_FREQ_HZ[23:16];
+                    frame_0x13_reg[15*8 +: 8] <= ADC_TEST_DDS_FREQ_HZ[31:24];
+                    frame_0x13_reg[16*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[7:0];
+                    frame_0x13_reg[17*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[15:8];
+                    frame_0x13_reg[18*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[23:16];
+                    frame_0x13_reg[19*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[31:24];
+                    frame_0x13_reg[20*8 +: 8] <= ADC_DISPLAY_SAMPLE_COUNT_U32[7:0];
+                    frame_0x13_reg[21*8 +: 8] <= ADC_DISPLAY_SAMPLE_COUNT_U32[15:8];
+                    frame_0x13_reg[22*8 +: 8] <= ADC_DISPLAY_SAMPLE_COUNT_U32[23:16];
+                    frame_0x13_reg[23*8 +: 8] <= ADC_DISPLAY_SAMPLE_COUNT_U32[31:24];
+                    frame_0x13_reg[24*8 +: 8] <= adc_result_measured_freq_hz[7:0];
+                    frame_0x13_reg[25*8 +: 8] <= adc_result_measured_freq_hz[15:8];
+                    frame_0x13_reg[26*8 +: 8] <= adc_result_measured_freq_hz[23:16];
+                    frame_0x13_reg[27*8 +: 8] <= adc_result_measured_freq_hz[31:24];
+                    frame_0x13_reg[28*8 +: 8] <= adc_wave_min_mv[7:0];
+                    frame_0x13_reg[29*8 +: 8] <= adc_wave_min_mv[15:8];
+                    frame_0x13_reg[30*8 +: 8] <= adc_wave_min_mv[23:16];
+                    frame_0x13_reg[31*8 +: 8] <= adc_wave_min_mv[31:24];
+                    frame_0x13_reg[32*8 +: 8] <= adc_wave_max_mv[7:0];
+                    frame_0x13_reg[33*8 +: 8] <= adc_wave_max_mv[15:8];
+                    frame_0x13_reg[34*8 +: 8] <= adc_wave_max_mv[23:16];
+                    frame_0x13_reg[35*8 +: 8] <= adc_wave_max_mv[31:24];
+                    frame_0x13_reg[36*8 +: 8] <= adc_wave_mean_mv[7:0];
+                    frame_0x13_reg[37*8 +: 8] <= adc_wave_mean_mv[15:8];
+                    frame_0x13_reg[38*8 +: 8] <= adc_wave_mean_mv[23:16];
+                    frame_0x13_reg[39*8 +: 8] <= adc_wave_mean_mv[31:24];
+                    frame_0x13_reg[40*8 +: 8] <= adc_wave_vpp_mv[7:0];
+                    frame_0x13_reg[41*8 +: 8] <= adc_wave_vpp_mv[15:8];
+                    frame_0x13_reg[42*8 +: 8] <= adc_wave_vpp_mv[23:16];
+                    frame_0x13_reg[43*8 +: 8] <= adc_wave_vpp_mv[31:24];
+                    frame_0x13_reg[44*8 +: 8] <= adc_result_raw_rms[7:0];
+                    frame_0x13_reg[45*8 +: 8] <= adc_result_raw_rms[15:8];
+                    frame_0x13_reg[46*8 +: 8] <= adc_result_raw_rms[23:16];
+                    frame_0x13_reg[47*8 +: 8] <= adc_result_raw_rms[31:24];
+                    frame_0x13_reg[48*8 +: 8] <= adc_result_amp_peak_raw[7:0];
+                    frame_0x13_reg[49*8 +: 8] <= adc_result_amp_peak_raw[15:8];
+                    frame_0x13_reg[50*8 +: 8] <= adc_result_amp_peak_raw[23:16];
+                    frame_0x13_reg[51*8 +: 8] <= adc_result_amp_peak_raw[31:24];
+                    frame_0x13_reg[52*8 +: 8] <= adc_result_amp_rms_raw[7:0];
+                    frame_0x13_reg[53*8 +: 8] <= adc_result_amp_rms_raw[15:8];
+                    frame_0x13_reg[54*8 +: 8] <= adc_result_amp_rms_raw[23:16];
+                    frame_0x13_reg[55*8 +: 8] <= adc_result_amp_rms_raw[31:24];
+                    frame_0x13_reg[56*8 +: 8] <= adc_result_phase_deg_x10[7:0];
+                    frame_0x13_reg[57*8 +: 8] <= adc_result_phase_deg_x10[15:8];
+                    frame_0x13_reg[58*8 +: 8] <= adc_result_phase_deg_x10[23:16];
+                    frame_0x13_reg[59*8 +: 8] <= adc_result_phase_deg_x10[31:24];
+                    frame_0x13_reg[60*8 +: 8] <= adc_result_flags[7:0];
+                    frame_0x13_reg[61*8 +: 8] <= adc_result_flags[15:8];
+                    frame_0x13_reg[62*8 +: 8] <= adc_result_flags[23:16];
+                    frame_0x13_reg[63*8 +: 8] <= adc_result_flags[31:24];
+                    frame_0x13_reg[64*8 +: 8] <= ADC_DISPLAY_DECIMATION[7:0];
+                    frame_0x13_reg[65*8 +: 8] <= ADC_DISPLAY_DECIMATION[15:8];
+                    frame_0x13_reg[66*8 +: 8] <= ADC_DISPLAY_DECIMATION[23:16];
+                    frame_0x13_reg[67*8 +: 8] <= ADC_DISPLAY_DECIMATION[31:24];
+                    frame_0x13_reg[68*8 +: 8] <= adc_result_zero_cross_count[7:0];
+                    frame_0x13_reg[69*8 +: 8] <= adc_result_zero_cross_count[15:8];
+                    frame_0x13_reg[70*8 +: 8] <= adc_result_zero_cross_count[23:16];
+                    frame_0x13_reg[71*8 +: 8] <= adc_result_zero_cross_count[31:24];
+                    state <= ST_ADC_TEST_CHK_RESULT;
+                end
+
+                ST_ADC_TEST_CHK_RESULT: begin
+                    frame_0x13_reg[116*8 +: 8] <=
+                        frame_0x13_reg[0*8+:8]  ^ frame_0x13_reg[1*8+:8]  ^ frame_0x13_reg[2*8+:8]  ^ frame_0x13_reg[3*8+:8]  ^
+                        frame_0x13_reg[4*8+:8]  ^ frame_0x13_reg[5*8+:8]  ^ frame_0x13_reg[6*8+:8]  ^ frame_0x13_reg[7*8+:8]  ^
+                        frame_0x13_reg[8*8+:8]  ^ frame_0x13_reg[9*8+:8]  ^ frame_0x13_reg[10*8+:8] ^ frame_0x13_reg[11*8+:8] ^
+                        frame_0x13_reg[12*8+:8] ^ frame_0x13_reg[13*8+:8] ^ frame_0x13_reg[14*8+:8] ^ frame_0x13_reg[15*8+:8] ^
+                        frame_0x13_reg[16*8+:8] ^ frame_0x13_reg[17*8+:8] ^ frame_0x13_reg[18*8+:8] ^ frame_0x13_reg[19*8+:8] ^
+                        frame_0x13_reg[20*8+:8] ^ frame_0x13_reg[21*8+:8] ^ frame_0x13_reg[22*8+:8] ^ frame_0x13_reg[23*8+:8] ^
+                        frame_0x13_reg[24*8+:8] ^ frame_0x13_reg[25*8+:8] ^ frame_0x13_reg[26*8+:8] ^ frame_0x13_reg[27*8+:8] ^
+                        frame_0x13_reg[28*8+:8] ^ frame_0x13_reg[29*8+:8] ^ frame_0x13_reg[30*8+:8] ^ frame_0x13_reg[31*8+:8] ^
+                        frame_0x13_reg[32*8+:8] ^ frame_0x13_reg[33*8+:8] ^ frame_0x13_reg[34*8+:8] ^ frame_0x13_reg[35*8+:8] ^
+                        frame_0x13_reg[36*8+:8] ^ frame_0x13_reg[37*8+:8] ^ frame_0x13_reg[38*8+:8] ^ frame_0x13_reg[39*8+:8] ^
+                        frame_0x13_reg[40*8+:8] ^ frame_0x13_reg[41*8+:8] ^ frame_0x13_reg[42*8+:8] ^ frame_0x13_reg[43*8+:8] ^
+                        frame_0x13_reg[44*8+:8] ^ frame_0x13_reg[45*8+:8] ^ frame_0x13_reg[46*8+:8] ^ frame_0x13_reg[47*8+:8] ^
+                        frame_0x13_reg[48*8+:8] ^ frame_0x13_reg[49*8+:8] ^ frame_0x13_reg[50*8+:8] ^ frame_0x13_reg[51*8+:8] ^
+                        frame_0x13_reg[52*8+:8] ^ frame_0x13_reg[53*8+:8] ^ frame_0x13_reg[54*8+:8] ^ frame_0x13_reg[55*8+:8] ^
+                        frame_0x13_reg[56*8+:8] ^ frame_0x13_reg[57*8+:8] ^ frame_0x13_reg[58*8+:8] ^ frame_0x13_reg[59*8+:8] ^
+                        frame_0x13_reg[60*8+:8] ^ frame_0x13_reg[61*8+:8] ^ frame_0x13_reg[62*8+:8] ^ frame_0x13_reg[63*8+:8] ^
+                        frame_0x13_reg[64*8+:8] ^ frame_0x13_reg[65*8+:8] ^ frame_0x13_reg[66*8+:8] ^ frame_0x13_reg[67*8+:8] ^
+                        frame_0x13_reg[68*8+:8] ^ frame_0x13_reg[69*8+:8] ^ frame_0x13_reg[70*8+:8] ^ frame_0x13_reg[71*8+:8] ^
+                        frame_0x13_reg[72*8+:8] ^ frame_0x13_reg[73*8+:8] ^ frame_0x13_reg[74*8+:8] ^ frame_0x13_reg[75*8+:8] ^
+                        frame_0x13_reg[76*8+:8] ^ frame_0x13_reg[77*8+:8] ^ frame_0x13_reg[78*8+:8] ^ frame_0x13_reg[79*8+:8] ^
+                        frame_0x13_reg[80*8+:8] ^ frame_0x13_reg[81*8+:8] ^ frame_0x13_reg[82*8+:8] ^ frame_0x13_reg[83*8+:8] ^
+                        frame_0x13_reg[84*8+:8] ^ frame_0x13_reg[85*8+:8] ^ frame_0x13_reg[86*8+:8] ^ frame_0x13_reg[87*8+:8] ^
+                        frame_0x13_reg[88*8+:8] ^ frame_0x13_reg[89*8+:8] ^ frame_0x13_reg[90*8+:8] ^ frame_0x13_reg[91*8+:8] ^
+                        frame_0x13_reg[92*8+:8] ^ frame_0x13_reg[93*8+:8] ^ frame_0x13_reg[94*8+:8] ^ frame_0x13_reg[95*8+:8] ^
+                        frame_0x13_reg[96*8+:8] ^ frame_0x13_reg[97*8+:8] ^ frame_0x13_reg[98*8+:8] ^ frame_0x13_reg[99*8+:8] ^
+                        frame_0x13_reg[100*8+:8]^ frame_0x13_reg[101*8+:8]^ frame_0x13_reg[102*8+:8]^ frame_0x13_reg[103*8+:8]^
+                        frame_0x13_reg[104*8+:8]^ frame_0x13_reg[105*8+:8]^ frame_0x13_reg[106*8+:8]^ frame_0x13_reg[107*8+:8]^
+                        frame_0x13_reg[108*8+:8]^ frame_0x13_reg[109*8+:8]^ frame_0x13_reg[110*8+:8]^ frame_0x13_reg[111*8+:8]^
+                        frame_0x13_reg[112*8+:8]^ frame_0x13_reg[113*8+:8]^ frame_0x13_reg[114*8+:8]^ frame_0x13_reg[115*8+:8];
+                    adc_result_send_active <= 1'b1;
+                    state <= ST_ADC_TEST_SEND_RESULT;
+                end
+
+                ST_ADC_TEST_SEND_RESULT: begin
+                    stat_state <= STATE_SCANNING;
+                    stat_progress <= 32'd875;
+                    if (!adc_result_send_active) begin
+                        stat_progress <= 32'd900;
+                        state <= ST_ADC_TEST_PREP_WAVE_CHUNK;
+                    end
+                end
+
+                ST_ADC_TEST_PREP_WAVE_CHUNK: begin
+                    stat_state <= STATE_SCANNING;
+                    stat_progress <= 32'd900;
+                    if (adc_wave_prep_index == 8'd0) begin
+                        frame_0x12_reg <= 1024'd0;
+                        frame_0x12_reg[0*8 +: 8] <= 8'hA5;  frame_0x12_reg[1*8 +: 8] <= 8'h5A;
+                        frame_0x12_reg[2*8 +: 8] <= 8'h12;   frame_0x12_reg[3*8 +: 8] <= 8'd112;
+                        frame_0x12_reg[4*8 +: 8] <= adc_wave_seq[7:0];      frame_0x12_reg[5*8 +: 8] <= adc_wave_seq[15:8];
+                        frame_0x12_reg[6*8 +: 8] <= adc_wave_seq[23:16];    frame_0x12_reg[7*8 +: 8] <= adc_wave_seq[31:24];
+                        frame_0x12_reg[8*8 +: 8] <= adc_wave_chunk_index[7:0];   frame_0x12_reg[9*8 +: 8] <= adc_wave_chunk_index[15:8];
+                        frame_0x12_reg[10*8 +: 8] <= adc_wave_chunk_index[23:16]; frame_0x12_reg[11*8 +: 8] <= adc_wave_chunk_index[31:24];
+                        frame_0x12_reg[12*8 +: 8] <= ADC_WAVE_CHUNK_COUNT[7:0];   frame_0x12_reg[13*8 +: 8] <= ADC_WAVE_CHUNK_COUNT[15:8];
+                        frame_0x12_reg[14*8 +: 8] <= ADC_WAVE_CHUNK_COUNT[23:16]; frame_0x12_reg[15*8 +: 8] <= ADC_WAVE_CHUNK_COUNT[31:24];
+                        frame_0x12_reg[16*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[7:0]; frame_0x12_reg[17*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[15:8];
+                        frame_0x12_reg[18*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[23:16];frame_0x12_reg[19*8 +: 8] <= ADC_A_SAMPLE_COUNT_U32[31:24];
+                        frame_0x12_reg[20*8 +: 8] <= (adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) & 8'hFF;
+                        frame_0x12_reg[21*8 +: 8] <= ((adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) >> 8) & 8'hFF;
+                        frame_0x12_reg[22*8 +: 8] <= ((adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) >> 16) & 8'hFF;
+                        frame_0x12_reg[23*8 +: 8] <= ((adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) >> 24) & 8'hFF;
+                        frame_0x12_reg[24*8 +: 8] <= adc_wave_flags_now[7:0];   frame_0x12_reg[25*8 +: 8] <= adc_wave_flags_now[15:8];
+                        frame_0x12_reg[26*8 +: 8] <= adc_wave_flags_now[23:16]; frame_0x12_reg[27*8 +: 8] <= adc_wave_flags_now[31:24];
+                    end else begin
+                        adc_wave_prep_sample_index = adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK +
+                            (adc_wave_prep_index - 8'd1);
+                        frame_0x12_reg[(32 + (adc_wave_prep_index-8'd1)*2)*8 +: 8] <= adc_wave_sample_for_frame[7:0];
+                        frame_0x12_reg[(33 + (adc_wave_prep_index-8'd1)*2)*8 +: 8] <= adc_wave_sample_for_frame[15:8];
+                    end
+                    if (adc_wave_prep_index >= ADC_WAVE_SAMPLES_PER_CHUNK[7:0]) begin
+                        adc_wave_prep_index <= 8'd0;
+                        state <= ST_ADC_TEST_CHK_WAVE;
+                    end else begin
+                        adc_wave_prep_index <= adc_wave_prep_index + 8'd1;
+                    end
+                end
+
+                ST_ADC_TEST_CHK_WAVE: begin
+                    frame_0x12_reg[116*8 +: 8] <=
+                        frame_0x12_reg[0*8+:8]  ^ frame_0x12_reg[1*8+:8]  ^ frame_0x12_reg[2*8+:8]  ^ frame_0x12_reg[3*8+:8]  ^
+                        frame_0x12_reg[4*8+:8]  ^ frame_0x12_reg[5*8+:8]  ^ frame_0x12_reg[6*8+:8]  ^ frame_0x12_reg[7*8+:8]  ^
+                        frame_0x12_reg[8*8+:8]  ^ frame_0x12_reg[9*8+:8]  ^ frame_0x12_reg[10*8+:8] ^ frame_0x12_reg[11*8+:8] ^
+                        frame_0x12_reg[12*8+:8] ^ frame_0x12_reg[13*8+:8] ^ frame_0x12_reg[14*8+:8] ^ frame_0x12_reg[15*8+:8] ^
+                        frame_0x12_reg[16*8+:8] ^ frame_0x12_reg[17*8+:8] ^ frame_0x12_reg[18*8+:8] ^ frame_0x12_reg[19*8+:8] ^
+                        frame_0x12_reg[20*8+:8] ^ frame_0x12_reg[21*8+:8] ^ frame_0x12_reg[22*8+:8] ^ frame_0x12_reg[23*8+:8] ^
+                        frame_0x12_reg[24*8+:8] ^ frame_0x12_reg[25*8+:8] ^ frame_0x12_reg[26*8+:8] ^ frame_0x12_reg[27*8+:8] ^
+                        frame_0x12_reg[28*8+:8] ^ frame_0x12_reg[29*8+:8] ^ frame_0x12_reg[30*8+:8] ^ frame_0x12_reg[31*8+:8] ^
+                        frame_0x12_reg[32*8+:8] ^ frame_0x12_reg[33*8+:8] ^ frame_0x12_reg[34*8+:8] ^ frame_0x12_reg[35*8+:8] ^
+                        frame_0x12_reg[36*8+:8] ^ frame_0x12_reg[37*8+:8] ^ frame_0x12_reg[38*8+:8] ^ frame_0x12_reg[39*8+:8] ^
+                        frame_0x12_reg[40*8+:8] ^ frame_0x12_reg[41*8+:8] ^ frame_0x12_reg[42*8+:8] ^ frame_0x12_reg[43*8+:8] ^
+                        frame_0x12_reg[44*8+:8] ^ frame_0x12_reg[45*8+:8] ^ frame_0x12_reg[46*8+:8] ^ frame_0x12_reg[47*8+:8] ^
+                        frame_0x12_reg[48*8+:8] ^ frame_0x12_reg[49*8+:8] ^ frame_0x12_reg[50*8+:8] ^ frame_0x12_reg[51*8+:8] ^
+                        frame_0x12_reg[52*8+:8] ^ frame_0x12_reg[53*8+:8] ^ frame_0x12_reg[54*8+:8] ^ frame_0x12_reg[55*8+:8] ^
+                        frame_0x12_reg[56*8+:8] ^ frame_0x12_reg[57*8+:8] ^ frame_0x12_reg[58*8+:8] ^ frame_0x12_reg[59*8+:8] ^
+                        frame_0x12_reg[60*8+:8] ^ frame_0x12_reg[61*8+:8] ^ frame_0x12_reg[62*8+:8] ^ frame_0x12_reg[63*8+:8] ^
+                        frame_0x12_reg[64*8+:8] ^ frame_0x12_reg[65*8+:8] ^ frame_0x12_reg[66*8+:8] ^ frame_0x12_reg[67*8+:8] ^
+                        frame_0x12_reg[68*8+:8] ^ frame_0x12_reg[69*8+:8] ^ frame_0x12_reg[70*8+:8] ^ frame_0x12_reg[71*8+:8] ^
+                        frame_0x12_reg[72*8+:8] ^ frame_0x12_reg[73*8+:8] ^ frame_0x12_reg[74*8+:8] ^ frame_0x12_reg[75*8+:8] ^
+                        frame_0x12_reg[76*8+:8] ^ frame_0x12_reg[77*8+:8] ^ frame_0x12_reg[78*8+:8] ^ frame_0x12_reg[79*8+:8] ^
+                        frame_0x12_reg[80*8+:8] ^ frame_0x12_reg[81*8+:8] ^ frame_0x12_reg[82*8+:8] ^ frame_0x12_reg[83*8+:8] ^
+                        frame_0x12_reg[84*8+:8] ^ frame_0x12_reg[85*8+:8] ^ frame_0x12_reg[86*8+:8] ^ frame_0x12_reg[87*8+:8] ^
+                        frame_0x12_reg[88*8+:8] ^ frame_0x12_reg[89*8+:8] ^ frame_0x12_reg[90*8+:8] ^ frame_0x12_reg[91*8+:8] ^
+                        frame_0x12_reg[92*8+:8] ^ frame_0x12_reg[93*8+:8] ^ frame_0x12_reg[94*8+:8] ^ frame_0x12_reg[95*8+:8] ^
+                        frame_0x12_reg[96*8+:8] ^ frame_0x12_reg[97*8+:8] ^ frame_0x12_reg[98*8+:8] ^ frame_0x12_reg[99*8+:8] ^
+                        frame_0x12_reg[100*8+:8]^ frame_0x12_reg[101*8+:8]^ frame_0x12_reg[102*8+:8]^ frame_0x12_reg[103*8+:8]^
+                        frame_0x12_reg[104*8+:8]^ frame_0x12_reg[105*8+:8]^ frame_0x12_reg[106*8+:8]^ frame_0x12_reg[107*8+:8]^
+                        frame_0x12_reg[108*8+:8]^ frame_0x12_reg[109*8+:8]^ frame_0x12_reg[110*8+:8]^ frame_0x12_reg[111*8+:8]^
+                        frame_0x12_reg[112*8+:8]^ frame_0x12_reg[113*8+:8]^ frame_0x12_reg[114*8+:8]^ frame_0x12_reg[115*8+:8];
+                    state <= ST_ADC_TEST_SEND_WAVE;
+                end
+
+                ST_ADC_TEST_SEND_WAVE: begin
+                    stat_state <= STATE_SCANNING;
+                    stat_progress <= 32'd900;
+                    if (!adc_wave_send_active) begin
                         stat_progress <= 32'd1000;
                         state <= ST_ADC_TEST_DONE;
                     end
@@ -754,12 +1023,16 @@ module pynq_adc_system_top #(
                 state <= ST_STOP;
             end
 
+            if (spi_a_done && adc_result_send_active)
+                adc_result_send_active <= 1'b0;
+
             if (spi_a_done && spi_a_tx_was_wave && adc_wave_send_active) begin
                 if (adc_wave_chunk_index >= (ADC_WAVE_CHUNK_COUNT - 1)) begin
                     adc_wave_chunk_index <= 32'd0;
                     adc_wave_send_active <= 1'b0;
                 end else begin
                     adc_wave_chunk_index <= adc_wave_chunk_index + 32'd1;
+                    state <= ST_ADC_TEST_PREP_WAVE_CHUNK;
                 end
             end
 
@@ -800,14 +1073,17 @@ module pynq_adc_system_top #(
     // SPI-A to ESP32-P4 (periodic, 100ms)
     // ============================================================
     reg [31:0] spi_a_period_cnt = 32'd0;
+    reg [31:0] adc_wave_chunk_gap_cnt = 32'd0;
     reg        spi_a_start = 1'b0;
+    wire       adc_result_tx_pending = adc_result_send_active;
     wire       adc_wave_tx_pending =
-        adc_wave_send_active && (adc_wave_chunk_index < ADC_WAVE_CHUNK_COUNT);
+        adc_wave_send_active && (state == ST_ADC_TEST_SEND_WAVE);
     wire [1023:0] spi_a_tx_frame;
 
     always @(posedge clk_125m) begin
         if (rst) begin
             spi_a_period_cnt <= 32'd0;
+            adc_wave_chunk_gap_cnt <= ADC_WAVE_CHUNK_GAP_CLKS;
             spi_a_start <= 1'b0;
             spi_a_tx_was_wave <= 1'b0;
             spi_a_request_in_progress <= 1'b0;
@@ -817,18 +1093,30 @@ module pynq_adc_system_top #(
             if (spi_a_done)
                 spi_a_request_in_progress <= 1'b0;
 
+            if (!adc_wave_tx_pending) begin
+                adc_wave_chunk_gap_cnt <= ADC_WAVE_CHUNK_GAP_CLKS;
+            end else if (adc_wave_chunk_gap_cnt < ADC_WAVE_CHUNK_GAP_CLKS) begin
+                adc_wave_chunk_gap_cnt <= adc_wave_chunk_gap_cnt + 32'd1;
+            end
+
             if (!spi_a_request_in_progress && !spi_a_busy) begin
-                if (adc_wave_tx_pending) begin
-                    spi_a_start <= 1'b1;
-                    spi_a_tx_was_wave <= 1'b1;
-                    spi_a_request_in_progress <= 1'b1;
-                    spi_a_period_cnt <= 32'd0;
-                end else if (spi_a_period_cnt >= (SPI_A_PERIOD_CLKS - 1)) begin
+                if (adc_result_tx_pending) begin
                     spi_a_start <= 1'b1;
                     spi_a_tx_was_wave <= 1'b0;
                     spi_a_request_in_progress <= 1'b1;
                     spi_a_period_cnt <= 32'd0;
-                end else begin
+                end else if (adc_wave_tx_pending && adc_wave_chunk_gap_cnt >= ADC_WAVE_CHUNK_GAP_CLKS) begin
+                    spi_a_start <= 1'b1;
+                    spi_a_tx_was_wave <= 1'b1;
+                    spi_a_request_in_progress <= 1'b1;
+                    adc_wave_chunk_gap_cnt <= 32'd0;
+                    spi_a_period_cnt <= 32'd0;
+                end else if (!adc_wave_tx_pending && spi_a_period_cnt >= (SPI_A_PERIOD_CLKS - 1)) begin
+                    spi_a_start <= 1'b1;
+                    spi_a_tx_was_wave <= 1'b0;
+                    spi_a_request_in_progress <= 1'b1;
+                    spi_a_period_cnt <= 32'd0;
+                end else if (!adc_wave_tx_pending) begin
                     spi_a_period_cnt <= spi_a_period_cnt + 32'd1;
                 end
             end else if (!adc_wave_tx_pending && spi_a_period_cnt < (SPI_A_PERIOD_CLKS - 1)) begin
@@ -874,96 +1162,11 @@ module pynq_adc_system_top #(
         frame_0x10[116*8 +: 8] = f10_chk;
     end
 
-    // 0x12 ADC CH-A waveform chunk builder (combinational)
-    reg [1023:0] frame_0x12;
-    reg [7:0] f12_chk;
-    integer f12_i;
-    integer f12_sample_i;
-    integer f12_sample_index;
-    reg signed [15:0] f12_sample_mv;
-    reg [31:0] adc_wave_flags;
+    // 0x12 frame_0x12_reg and 0x13 frame_0x13_reg are built in
+    // ST_ADC_TEST_PREP_WAVE_CHUNK / ST_ADC_TEST_PREP_RESULT.
 
-    always @* begin
-        frame_0x12 = 1024'd0;
-        frame_0x12[0*8 +: 8]  = 8'hA5;
-        frame_0x12[1*8 +: 8]  = 8'h5A;
-        frame_0x12[2*8 +: 8]  = 8'h12;
-        frame_0x12[3*8 +: 8]  = 8'd112;
-
-        adc_wave_flags = ADC_WAVE_FLAGS_VALID;
-        if (adc_wave_chunk_index >= (ADC_WAVE_CHUNK_COUNT - 1))
-            adc_wave_flags = adc_wave_flags | ADC_WAVE_FLAGS_DONE;
-        if (adc_wave_overrange)
-            adc_wave_flags = adc_wave_flags | ADC_WAVE_FLAGS_OVERRANGE;
-        if (ADC_WAVE_RAW_DEBUG)
-            adc_wave_flags = adc_wave_flags | ADC_WAVE_FLAGS_RAW;
-
-        frame_0x12[4*8 +: 8]   = adc_wave_seq[7:0];
-        frame_0x12[5*8 +: 8]   = adc_wave_seq[15:8];
-        frame_0x12[6*8 +: 8]   = adc_wave_seq[23:16];
-        frame_0x12[7*8 +: 8]   = adc_wave_seq[31:24];
-        frame_0x12[8*8 +: 8]   = adc_wave_chunk_index[7:0];
-        frame_0x12[9*8 +: 8]   = adc_wave_chunk_index[15:8];
-        frame_0x12[10*8 +: 8]  = adc_wave_chunk_index[23:16];
-        frame_0x12[11*8 +: 8]  = adc_wave_chunk_index[31:24];
-        frame_0x12[12*8 +: 8]  = ADC_WAVE_CHUNK_COUNT[7:0];
-        frame_0x12[13*8 +: 8]  = ADC_WAVE_CHUNK_COUNT[15:8];
-        frame_0x12[14*8 +: 8]  = ADC_WAVE_CHUNK_COUNT[23:16];
-        frame_0x12[15*8 +: 8]  = ADC_WAVE_CHUNK_COUNT[31:24];
-        frame_0x12[16*8 +: 8]  = ADC_A_SAMPLE_HZ[7:0];
-        frame_0x12[17*8 +: 8]  = ADC_A_SAMPLE_HZ[15:8];
-        frame_0x12[18*8 +: 8]  = ADC_A_SAMPLE_HZ[23:16];
-        frame_0x12[19*8 +: 8]  = ADC_A_SAMPLE_HZ[31:24];
-        frame_0x12[20*8 +: 8]  = ADC_TEST_DDS_FREQ_HZ[7:0];
-        frame_0x12[21*8 +: 8]  = ADC_TEST_DDS_FREQ_HZ[15:8];
-        frame_0x12[22*8 +: 8]  = ADC_TEST_DDS_FREQ_HZ[23:16];
-        frame_0x12[23*8 +: 8]  = ADC_TEST_DDS_FREQ_HZ[31:24];
-        frame_0x12[24*8 +: 8]  = ADC_A_SAMPLE_COUNT_U32[7:0];
-        frame_0x12[25*8 +: 8]  = ADC_A_SAMPLE_COUNT_U32[15:8];
-        frame_0x12[26*8 +: 8]  = ADC_A_SAMPLE_COUNT_U32[23:16];
-        frame_0x12[27*8 +: 8]  = ADC_A_SAMPLE_COUNT_U32[31:24];
-        frame_0x12[28*8 +: 8]  = (adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) & 8'hFF;
-        frame_0x12[29*8 +: 8]  = ((adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) >> 8) & 8'hFF;
-        frame_0x12[30*8 +: 8]  = ((adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) >> 16) & 8'hFF;
-        frame_0x12[31*8 +: 8]  = ((adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK) >> 24) & 8'hFF;
-        frame_0x12[32*8 +: 8]  = adc_wave_min_mv[7:0];
-        frame_0x12[33*8 +: 8]  = adc_wave_min_mv[15:8];
-        frame_0x12[34*8 +: 8]  = {8{adc_wave_min_mv[15]}};
-        frame_0x12[35*8 +: 8]  = {8{adc_wave_min_mv[15]}};
-        frame_0x12[36*8 +: 8]  = adc_wave_max_mv[7:0];
-        frame_0x12[37*8 +: 8]  = adc_wave_max_mv[15:8];
-        frame_0x12[38*8 +: 8]  = {8{adc_wave_max_mv[15]}};
-        frame_0x12[39*8 +: 8]  = {8{adc_wave_max_mv[15]}};
-        frame_0x12[40*8 +: 8]  = adc_wave_mean_mv[7:0];
-        frame_0x12[41*8 +: 8]  = adc_wave_mean_mv[15:8];
-        frame_0x12[42*8 +: 8]  = adc_wave_mean_mv[23:16];
-        frame_0x12[43*8 +: 8]  = adc_wave_mean_mv[31:24];
-        frame_0x12[44*8 +: 8]  = adc_wave_vpp_mv[7:0];
-        frame_0x12[45*8 +: 8]  = adc_wave_vpp_mv[15:8];
-        frame_0x12[46*8 +: 8]  = adc_wave_vpp_mv[23:16];
-        frame_0x12[47*8 +: 8]  = adc_wave_vpp_mv[31:24];
-        frame_0x12[48*8 +: 8]  = adc_wave_flags[7:0];
-        frame_0x12[49*8 +: 8]  = adc_wave_flags[15:8];
-        frame_0x12[50*8 +: 8]  = adc_wave_flags[23:16];
-        frame_0x12[51*8 +: 8]  = adc_wave_flags[31:24];
-
-        for (f12_sample_i = 0; f12_sample_i < ADC_WAVE_SAMPLES_PER_CHUNK; f12_sample_i = f12_sample_i + 1) begin
-            f12_sample_index = adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK + f12_sample_i;
-            if (f12_sample_index < ADC_A_SAMPLE_COUNT)
-                f12_sample_mv = adc_wave_samples[f12_sample_index];
-            else
-                f12_sample_mv = 16'sd0;
-            frame_0x12[(52 + f12_sample_i*2)*8 +: 8] = f12_sample_mv[7:0];
-            frame_0x12[(53 + f12_sample_i*2)*8 +: 8] = f12_sample_mv[15:8];
-        end
-
-        f12_chk = 8'd0;
-        for (f12_i = 0; f12_i < 116; f12_i = f12_i + 1)
-            f12_chk = f12_chk ^ frame_0x12[f12_i*8 +: 8];
-        frame_0x12[116*8 +: 8] = f12_chk;
-    end
-
-    assign spi_a_tx_frame = adc_wave_tx_pending ? frame_0x12 : frame_0x10;
+    assign spi_a_tx_frame = adc_result_tx_pending ? frame_0x13_reg :
+                            (adc_wave_tx_pending ? frame_0x12_reg : frame_0x10);
 
     spi_master_128b #(.CLK_DIV_HALF(SPI_A_CLK_DIV_HALF)) u_spi_a (
         .clk(clk_125m), .rst(rst),

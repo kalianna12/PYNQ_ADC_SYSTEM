@@ -1,6 +1,6 @@
 module ad9226_ch_a_capture #(
     parameter integer CLK_HZ = 125000000,
-    parameter integer ADC_SAMPLE_HZ = 1000000,
+    parameter integer ADC_SAMPLE_HZ = 100000,
     parameter integer SAMPLE_COUNT = 256,
     parameter integer SAMPLE_DELAY_CLKS = 2
 ) (
@@ -94,7 +94,7 @@ module ad9226_ch_a_capture #(
 
                     if (!adc_a_clk) begin
                         sample_pending <= 1'b1;
-                        sample_delay_cnt <= SAMPLE_DELAY_CLKS[7:0];
+                        sample_delay_cnt <= SAMPLE_DELAY_CLKS;
                     end
                 end else begin
                     div_cnt <= div_cnt + 32'd1;
