@@ -158,6 +158,7 @@ module pynq_adc_system_top #(
     // SPI-A signals are declared before the main FSM because the FSM advances
     // ADC waveform chunks after completed SPI-A transfers.
     reg        spi_a_tx_was_wave = 1'b0;
+    reg        spi_a_request_in_progress = 1'b0;
     wire       spi_a_busy;
     wire       spi_a_done;
     wire [1023:0] spi_a_rx_frame;
@@ -257,15 +258,18 @@ module pynq_adc_system_top #(
     // ============================================================
     // AD9226 channel A capture block
     // ============================================================
-    localparam [31:0] ADC_A_SAMPLE_HZ = 32'd1000000;
+    localparam [31:0] ADC_A_SAMPLE_HZ = 32'd100000;
     localparam integer ADC_A_SAMPLE_COUNT = 256;
     localparam [31:0] ADC_A_SAMPLE_COUNT_U32 = 32'd256;
+    localparam integer ADC_A_SAMPLE_DELAY_CLKS = 2;
     localparam integer ADC_WAVE_SAMPLES_PER_CHUNK = 30;
     localparam [31:0] ADC_WAVE_CHUNK_COUNT =
         (ADC_A_SAMPLE_COUNT + ADC_WAVE_SAMPLES_PER_CHUNK - 1) / ADC_WAVE_SAMPLES_PER_CHUNK;
     localparam [31:0] ADC_WAVE_FLAGS_OVERRANGE = 32'h00000001;
     localparam [31:0] ADC_WAVE_FLAGS_DONE      = 32'h00000002;
     localparam [31:0] ADC_WAVE_FLAGS_VALID     = 32'h00000004;
+    localparam [31:0] ADC_WAVE_FLAGS_RAW       = 32'h00000008;
+    localparam        ADC_WAVE_RAW_DEBUG       = 1'b1;
 
     reg adc_a_capture_start = 1'b0;
     wire adc_a_capture_busy;
@@ -277,6 +281,9 @@ module pynq_adc_system_top #(
     wire signed [15:0] adc_a_min_mv;
     wire signed [15:0] adc_a_max_mv;
     wire signed [31:0] adc_a_sum_mv;
+    wire [11:0] adc_a_min_raw;
+    wire [11:0] adc_a_max_raw;
+    wire [31:0] adc_a_sum_raw;
     wire adc_a_overrange_seen;
 
     reg signed [15:0] adc_wave_samples [0:ADC_A_SAMPLE_COUNT-1];
@@ -294,7 +301,7 @@ module pynq_adc_system_top #(
         .CLK_HZ(125000000),
         .ADC_SAMPLE_HZ(ADC_A_SAMPLE_HZ),
         .SAMPLE_COUNT(ADC_A_SAMPLE_COUNT),
-        .SAMPLE_DELAY_CLKS(2)
+        .SAMPLE_DELAY_CLKS(ADC_A_SAMPLE_DELAY_CLKS)
     ) u_ad9226_ch_a_capture (
         .clk(clk_125m),
         .rst(rst),
@@ -311,6 +318,9 @@ module pynq_adc_system_top #(
         .min_mv(adc_a_min_mv),
         .max_mv(adc_a_max_mv),
         .sum_mv(adc_a_sum_mv),
+        .min_raw(adc_a_min_raw),
+        .max_raw(adc_a_max_raw),
+        .sum_raw(adc_a_sum_raw),
         .overrange_seen(adc_a_overrange_seen)
     );
 
@@ -319,7 +329,10 @@ module pynq_adc_system_top #(
             for (ii = 0; ii < ADC_A_SAMPLE_COUNT; ii = ii + 1)
                 adc_wave_samples[ii] <= 16'sd0;
         end else if (adc_a_sample_valid && adc_a_sample_index < ADC_A_SAMPLE_COUNT) begin
-            adc_wave_samples[adc_a_sample_index] <= adc_a_sample_mv;
+            if (ADC_WAVE_RAW_DEBUG)
+                adc_wave_samples[adc_a_sample_index] <= {4'd0, adc_a_sample_raw};
+            else
+                adc_wave_samples[adc_a_sample_index] <= adc_a_sample_mv;
         end
     end
 
@@ -676,16 +689,26 @@ module pynq_adc_system_top #(
                         adc_wave_seq <= adc_wave_seq + 32'd1;
                         adc_wave_chunk_index <= 32'd0;
                         adc_wave_send_active <= 1'b1;
-                        adc_wave_min_mv <= adc_a_min_mv;
-                        adc_wave_max_mv <= adc_a_max_mv;
-                        adc_wave_sum_mv <= adc_a_sum_mv;
-                        adc_wave_mean_mv <= adc_a_sum_mv / ADC_A_SAMPLE_COUNT;
-                        adc_wave_vpp_mv <= {{16{adc_a_max_mv[15]}}, adc_a_max_mv} -
-                                           {{16{adc_a_min_mv[15]}}, adc_a_min_mv};
+                        if (ADC_WAVE_RAW_DEBUG) begin
+                            adc_wave_min_mv <= {4'd0, adc_a_min_raw};
+                            adc_wave_max_mv <= {4'd0, adc_a_max_raw};
+                            adc_wave_sum_mv <= adc_a_sum_raw;
+                            adc_wave_mean_mv <= adc_a_sum_raw / ADC_A_SAMPLE_COUNT;
+                            adc_wave_vpp_mv <= {20'd0, adc_a_max_raw} - {20'd0, adc_a_min_raw};
+                            stat_vin_mv <= adc_a_sum_raw / ADC_A_SAMPLE_COUNT;
+                            stat_vout_mv <= {20'd0, adc_a_max_raw} - {20'd0, adc_a_min_raw};
+                        end else begin
+                            adc_wave_min_mv <= adc_a_min_mv;
+                            adc_wave_max_mv <= adc_a_max_mv;
+                            adc_wave_sum_mv <= adc_a_sum_mv;
+                            adc_wave_mean_mv <= adc_a_sum_mv / ADC_A_SAMPLE_COUNT;
+                            adc_wave_vpp_mv <= {{16{adc_a_max_mv[15]}}, adc_a_max_mv} -
+                                               {{16{adc_a_min_mv[15]}}, adc_a_min_mv};
+                            stat_vin_mv <= adc_a_sum_mv / ADC_A_SAMPLE_COUNT;
+                            stat_vout_mv <= {{16{adc_a_max_mv[15]}}, adc_a_max_mv} -
+                                            {{16{adc_a_min_mv[15]}}, adc_a_min_mv};
+                        end
                         adc_wave_overrange <= adc_a_overrange_seen;
-                        stat_vin_mv <= adc_a_sum_mv / ADC_A_SAMPLE_COUNT;
-                        stat_vout_mv <= {{16{adc_a_max_mv[15]}}, adc_a_max_mv} -
-                                        {{16{adc_a_min_mv[15]}}, adc_a_min_mv};
                         stat_gain_x1000 <= 32'd0;
                         stat_phase_deg_x10 <= 32'd0;
                         stat_progress <= 32'd1000;
@@ -731,7 +754,7 @@ module pynq_adc_system_top #(
                 state <= ST_STOP;
             end
 
-            if (spi_a_done && spi_a_tx_was_wave) begin
+            if (spi_a_done && spi_a_tx_was_wave && adc_wave_send_active) begin
                 if (adc_wave_chunk_index >= (ADC_WAVE_CHUNK_COUNT - 1)) begin
                     adc_wave_chunk_index <= 32'd0;
                     adc_wave_send_active <= 1'b0;
@@ -787,21 +810,30 @@ module pynq_adc_system_top #(
             spi_a_period_cnt <= 32'd0;
             spi_a_start <= 1'b0;
             spi_a_tx_was_wave <= 1'b0;
+            spi_a_request_in_progress <= 1'b0;
         end else begin
             spi_a_start <= 1'b0;
-            if (!spi_a_busy && adc_wave_tx_pending) begin
-                spi_a_start <= 1'b1;
-                spi_a_tx_was_wave <= 1'b1;
-            end else if (spi_a_period_cnt >= (SPI_A_PERIOD_CLKS - 1)) begin
-                spi_a_period_cnt <= 32'd0;
-                if (!spi_a_busy) begin
+
+            if (spi_a_done)
+                spi_a_request_in_progress <= 1'b0;
+
+            if (!spi_a_request_in_progress && !spi_a_busy) begin
+                if (adc_wave_tx_pending) begin
+                    spi_a_start <= 1'b1;
+                    spi_a_tx_was_wave <= 1'b1;
+                    spi_a_request_in_progress <= 1'b1;
+                    spi_a_period_cnt <= 32'd0;
+                end else if (spi_a_period_cnt >= (SPI_A_PERIOD_CLKS - 1)) begin
                     spi_a_start <= 1'b1;
                     spi_a_tx_was_wave <= 1'b0;
+                    spi_a_request_in_progress <= 1'b1;
+                    spi_a_period_cnt <= 32'd0;
+                end else begin
+                    spi_a_period_cnt <= spi_a_period_cnt + 32'd1;
                 end
-            end else begin
+            end else if (!adc_wave_tx_pending && spi_a_period_cnt < (SPI_A_PERIOD_CLKS - 1)) begin
                 spi_a_period_cnt <= spi_a_period_cnt + 32'd1;
             end
-
         end
     end
 
@@ -858,9 +890,13 @@ module pynq_adc_system_top #(
         frame_0x12[2*8 +: 8]  = 8'h12;
         frame_0x12[3*8 +: 8]  = 8'd112;
 
-        adc_wave_flags = ADC_WAVE_FLAGS_DONE | ADC_WAVE_FLAGS_VALID;
+        adc_wave_flags = ADC_WAVE_FLAGS_VALID;
+        if (adc_wave_chunk_index >= (ADC_WAVE_CHUNK_COUNT - 1))
+            adc_wave_flags = adc_wave_flags | ADC_WAVE_FLAGS_DONE;
         if (adc_wave_overrange)
             adc_wave_flags = adc_wave_flags | ADC_WAVE_FLAGS_OVERRANGE;
+        if (ADC_WAVE_RAW_DEBUG)
+            adc_wave_flags = adc_wave_flags | ADC_WAVE_FLAGS_RAW;
 
         frame_0x12[4*8 +: 8]   = adc_wave_seq[7:0];
         frame_0x12[5*8 +: 8]   = adc_wave_seq[15:8];
