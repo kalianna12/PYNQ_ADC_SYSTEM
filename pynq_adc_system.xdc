@@ -56,9 +56,9 @@ set_property IOSTANDARD LVCMOS33 [get_ports adc_a_clk]
 ## A5  hardware V6  -> XDC Y18
 ## A6  hardware W6  -> XDC W6
 ## A7  hardware U7  -> XDC U7
-## A8  hardware V18 -> XDC V18
+## A8  hardware U18 -> XDC Y7
 ## A9  hardware V7  -> XDC V7
-## A10 hardware U19 -> XDC U19
+## A10 hardware U19 -> XDC F20
 ## A11 hardware U8  -> XDC U8
 ## A12 hardware F19 -> XDC F19
 set_property PACKAGE_PIN W18 [get_ports {adc_a_data[0]}]
@@ -68,9 +68,9 @@ set_property PACKAGE_PIN C20 [get_ports {adc_a_data[3]}]
 set_property PACKAGE_PIN Y18 [get_ports {adc_a_data[4]}]
 set_property PACKAGE_PIN W6  [get_ports {adc_a_data[5]}]
 set_property PACKAGE_PIN U7  [get_ports {adc_a_data[6]}]
-set_property PACKAGE_PIN V18 [get_ports {adc_a_data[7]}]
+set_property PACKAGE_PIN Y7 [get_ports {adc_a_data[7]}]
 set_property PACKAGE_PIN V7  [get_ports {adc_a_data[8]}]
-set_property PACKAGE_PIN U19 [get_ports {adc_a_data[9]}]
+set_property PACKAGE_PIN F20 [get_ports {adc_a_data[9]}]
 set_property PACKAGE_PIN U8  [get_ports {adc_a_data[10]}]
 set_property PACKAGE_PIN F19 [get_ports {adc_a_data[11]}]
 set_property IOSTANDARD LVCMOS33 [get_ports {adc_a_data[*]}]
