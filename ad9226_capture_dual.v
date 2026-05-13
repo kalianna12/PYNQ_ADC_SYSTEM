@@ -8,6 +8,9 @@ module ad9226_capture_dual #(
     input  wire        clk,
     input  wire        rst,
     input  wire        start,
+    input  wire [15:0] adc_half_period_clks_cfg,
+    input  wire [7:0]  sample_delay_clks_cfg,
+    input  wire [15:0] sample_count_cfg,
 
     output reg         busy,
     output reg         done,
@@ -39,30 +42,37 @@ module ad9226_capture_dual #(
     output reg         overrange_seen
 );
 
-    // Next DFT/synchronous-detection stage can replace these parameters with
-    // runtime config ports: adc_half_period_clks_cfg, sample_delay_clks_cfg,
-    // and sample_count_cfg. For the current raw-Vpp baseline they stay static.
-    localparam integer SAMPLE_DELAY_LOAD_INT =
-        (SAMPLE_DELAY_CLKS < 0) ? 0 :
-        (SAMPLE_DELAY_CLKS > 255) ? 255 : SAMPLE_DELAY_CLKS;
+    localparam [15:0] ADC_HALF_PERIOD_DEFAULT =
+        (ADC_CLK_HALF_PERIOD_CLKS < 1) ? 16'd1 :
+        (ADC_CLK_HALF_PERIOD_CLKS > 65535) ? 16'hffff :
+        ADC_CLK_HALF_PERIOD_CLKS;
+    localparam [7:0] SAMPLE_DELAY_DEFAULT =
+        (SAMPLE_DELAY_CLKS < 0) ? 8'd0 :
+        (SAMPLE_DELAY_CLKS > 255) ? 8'hff :
+        SAMPLE_DELAY_CLKS;
+    localparam [15:0] SAMPLE_COUNT_DEFAULT =
+        (SAMPLE_COUNT < 1) ? 16'd1 :
+        (SAMPLE_COUNT > 65535) ? 16'hffff :
+        SAMPLE_COUNT;
 
-    localparam integer ADC_DIV_CNT_WIDTH =
-        (ADC_CLK_HALF_PERIOD_CLKS <= 2)    ? 1 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 4)    ? 2 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 8)    ? 3 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 16)   ? 4 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 32)   ? 5 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 64)   ? 6 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 128)  ? 7 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 256)  ? 8 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 512)  ? 9 :
-        (ADC_CLK_HALF_PERIOD_CLKS <= 1024) ? 10 : 16;
+    wire [15:0] adc_half_period_clks_safe =
+        (adc_half_period_clks_cfg == 16'd0) ? ADC_HALF_PERIOD_DEFAULT :
+        adc_half_period_clks_cfg;
+    wire [7:0] sample_delay_clks_safe =
+        (sample_delay_clks_cfg == 8'd0) ? SAMPLE_DELAY_DEFAULT :
+        sample_delay_clks_cfg;
+    wire [15:0] sample_count_safe =
+        (sample_count_cfg == 16'd0) ? SAMPLE_COUNT_DEFAULT :
+        sample_count_cfg;
 
     (* mark_debug = "true" *) reg adc_a_clk_reg = 1'b0;
     (* mark_debug = "true" *) reg adc_b_clk_reg = 1'b0;
-    (* mark_debug = "true" *) reg [ADC_DIV_CNT_WIDTH-1:0] adc_clk_div_cnt = {ADC_DIV_CNT_WIDTH{1'b0}};
+    (* mark_debug = "true" *) reg [15:0] adc_clk_div_cnt = 16'd0;
     (* mark_debug = "true" *) reg sample_delay_active = 1'b0;
     (* mark_debug = "true" *) reg [7:0] sample_delay_cnt = 8'd0;
+    (* mark_debug = "true" *) reg [15:0] adc_half_period_clks_active = ADC_HALF_PERIOD_DEFAULT;
+    (* mark_debug = "true" *) reg [7:0] sample_delay_clks_active = SAMPLE_DELAY_DEFAULT;
+    (* mark_debug = "true" *) reg [15:0] sample_count_active = SAMPLE_COUNT_DEFAULT;
 
     reg adc_a_ora_meta = 1'b0;
     reg adc_b_orb_meta = 1'b0;
@@ -79,9 +89,12 @@ module ad9226_capture_dual #(
         if (rst) begin
             adc_a_clk_reg <= 1'b0;
             adc_b_clk_reg <= 1'b0;
-            adc_clk_div_cnt <= {ADC_DIV_CNT_WIDTH{1'b0}};
+            adc_clk_div_cnt <= 16'd0;
             sample_delay_active <= 1'b0;
             sample_delay_cnt <= 8'd0;
+            adc_half_period_clks_active <= ADC_HALF_PERIOD_DEFAULT;
+            sample_delay_clks_active <= SAMPLE_DELAY_DEFAULT;
+            sample_count_active <= SAMPLE_COUNT_DEFAULT;
             busy <= 1'b0;
             done <= 1'b0;
             sample_index <= 16'd0;
@@ -114,9 +127,12 @@ module ad9226_capture_dual #(
                 busy <= 1'b1;
                 adc_a_clk_reg <= 1'b0;
                 adc_b_clk_reg <= 1'b0;
-                adc_clk_div_cnt <= {ADC_DIV_CNT_WIDTH{1'b0}};
+                adc_clk_div_cnt <= 16'd0;
                 sample_delay_active <= 1'b0;
                 sample_delay_cnt <= 8'd0;
+                adc_half_period_clks_active <= adc_half_period_clks_safe;
+                sample_delay_clks_active <= sample_delay_clks_safe;
+                sample_count_active <= sample_count_safe;
                 sample_index <= 16'd0;
                 sample_a_raw <= 12'd0;
                 sample_b_raw <= 12'd0;
@@ -130,14 +146,14 @@ module ad9226_capture_dual #(
                 sum_b_raw <= 32'd0;
                 overrange_seen <= 1'b0;
             end else if (busy) begin
-                if (adc_clk_div_cnt == ADC_CLK_HALF_PERIOD_CLKS - 1) begin
-                    adc_clk_div_cnt <= {ADC_DIV_CNT_WIDTH{1'b0}};
+                if (adc_clk_div_cnt >= adc_half_period_clks_active - 16'd1) begin
+                    adc_clk_div_cnt <= 16'd0;
                     adc_a_clk_reg <= ~adc_a_clk_reg;
                     adc_b_clk_reg <= ~adc_b_clk_reg;
 
                     if (!sample_delay_active && adc_a_clk_reg == 1'b0) begin
                         sample_delay_active <= 1'b1;
-                        sample_delay_cnt <= SAMPLE_DELAY_LOAD_INT;
+                        sample_delay_cnt <= sample_delay_clks_active;
                     end
                 end else begin
                     adc_clk_div_cnt <= adc_clk_div_cnt + 1'b1;
@@ -169,7 +185,7 @@ module ad9226_capture_dual #(
                             vpp_b_raw <= max_b_next - min_b_next;
                         end
 
-                        if (sample_index >= SAMPLE_COUNT - 1) begin
+                        if (sample_index >= sample_count_active - 16'd1) begin
                             busy <= 1'b0;
                             done <= 1'b1;
                         end else begin

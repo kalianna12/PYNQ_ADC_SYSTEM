@@ -275,15 +275,73 @@ module pynq_adc_system_top #(
     localparam [31:0] ADC_WAVE_FLAGS_CLIP      = 32'h00000010;
     localparam [31:0] ADC_WAVE_FLAGS_FREQ_VALID= 32'h00000020;
     localparam [31:0] ADC_WAVE_FLAGS_DFT_VALID = 32'h00000040;
+    localparam [31:0] ADC_WAVE_FLAGS_ADC_RATE_CLAMPED = 32'h00000100;
+    localparam [31:0] ADC_WAVE_FLAGS_PHASE_VALID      = 32'h00000200;
+    localparam [31:0] ADC_WAVE_FLAGS_CORDIC_ORDER_UNCERTAIN = 32'h00000400;
     localparam [31:0] ADC_WAVE_CHUNK_GAP_CLKS  = 32'd0;
     localparam        ADC_WAVE_RAW_DEBUG       = 1'b1;
     localparam [31:0] ADC_DISPLAY_SAMPLE_COUNT_U32 = 32'd256;
     localparam [31:0] ADC_DISPLAY_DECIMATION = 32'd1;
-    // First DFT bring-up uses a fixed coherent LUT step, M=128 samples/cycle.
-    // TODO: derive this from the selected DDS frequency and ADC sample clock
-    // once the sweep frequency plan is locked to coherent sample windows.
-    localparam [11:0] ADC_SYNC_PHASE_STEP_CFG = 12'd32;
+    localparam [31:0] ADC_INPUT_CLK_HZ = 32'd125000000;
+    localparam [15:0] ADC_HALF_PERIOD_MIN_CLKS = 16'd7;
     localparam [15:0] ADC_SYNC_SAMPLE_COUNT_CFG = 16'd4096;
+
+    reg [31:0] sync_samples_per_cycle_m = 32'd256;
+    reg [11:0] sync_phase_step_cfg = 12'd16;
+    reg [15:0] adc_half_period_clks_cfg = ADC_A_CLK_HALF_PERIOD_CLKS;
+    reg [7:0]  adc_sample_delay_clks_cfg = ADC_A_SAMPLE_DELAY_CLKS;
+    reg        adc_rate_clamped_cfg = 1'b0;
+    reg [63:0] adc_cfg_denom = 64'd0;
+    reg [63:0] adc_half_period_calc64 = 64'd0;
+
+    always @* begin
+        if (current_freq_hz < 32'd300) begin
+            sync_samples_per_cycle_m = 32'd1024;
+            sync_phase_step_cfg = 12'd4;
+        end else if (current_freq_hz < 32'd1000) begin
+            sync_samples_per_cycle_m = 32'd512;
+            sync_phase_step_cfg = 12'd8;
+        end else if (current_freq_hz < 32'd5000) begin
+            sync_samples_per_cycle_m = 32'd256;
+            sync_phase_step_cfg = 12'd16;
+        end else if (current_freq_hz < 32'd20000) begin
+            sync_samples_per_cycle_m = 32'd128;
+            sync_phase_step_cfg = 12'd32;
+        end else begin
+            sync_samples_per_cycle_m = 32'd64;
+            sync_phase_step_cfg = 12'd64;
+        end
+
+        adc_cfg_denom =
+            {32'd0, current_freq_hz} *
+            {32'd0, sync_samples_per_cycle_m} *
+            64'd2;
+
+        if (adc_cfg_denom == 64'd0)
+            adc_half_period_calc64 = ADC_A_CLK_HALF_PERIOD_CLKS;
+        else
+            adc_half_period_calc64 =
+                ({32'd0, ADC_INPUT_CLK_HZ} + (adc_cfg_denom >> 1)) /
+                adc_cfg_denom;
+
+        adc_rate_clamped_cfg = 1'b0;
+        if (adc_half_period_calc64 < ADC_HALF_PERIOD_MIN_CLKS) begin
+            adc_half_period_clks_cfg = ADC_HALF_PERIOD_MIN_CLKS;
+            adc_rate_clamped_cfg = 1'b1;
+        end else if (adc_half_period_calc64 > 64'd65535) begin
+            adc_half_period_clks_cfg = 16'hffff;
+            adc_rate_clamped_cfg = 1'b1;
+        end else begin
+            adc_half_period_clks_cfg = adc_half_period_calc64[15:0];
+        end
+
+        if (adc_half_period_clks_cfg > 16'd80)
+            adc_sample_delay_clks_cfg = ADC_A_SAMPLE_DELAY_CLKS;
+        else if (adc_half_period_clks_cfg > 16'd4)
+            adc_sample_delay_clks_cfg = adc_half_period_clks_cfg[8:1];
+        else
+            adc_sample_delay_clks_cfg = 8'd1;
+    end
 
     reg adc_capture_start = 1'b0;
     reg adc_capture_started = 1'b0;
@@ -358,6 +416,9 @@ module pynq_adc_system_top #(
         .clk(clk_125m),
         .rst(rst),
         .start(adc_capture_start),
+        .adc_half_period_clks_cfg(adc_half_period_clks_cfg),
+        .sample_delay_clks_cfg(adc_sample_delay_clks_cfg),
+        .sample_count_cfg(ADC_SYNC_SAMPLE_COUNT_CFG),
         .busy(adc_capture_busy),
         .done(adc_capture_done),
         .adc_a_clk(adc_a_clk),
@@ -386,6 +447,8 @@ module pynq_adc_system_top #(
     sync_detector #(
         .DEFAULT_SAMPLE_COUNT(ADC_A_SAMPLE_COUNT),
         .CORDIC_INPUT_SHIFT(9),
+        .CORDIC_XY_SWAP(1'b0),
+        .CORDIC_OUT_SWAP(1'b0),
         .PHASE_SIGN_INVERT(1'b0)
     ) u_sync_detector (
         .clk(clk_125m),
@@ -394,7 +457,7 @@ module pynq_adc_system_top #(
         .sample_valid(adc_sample_valid),
         .sample_a_raw(adc_a_sample_raw),
         .sample_b_raw(adc_b_sample_raw),
-        .phase_step_cfg(ADC_SYNC_PHASE_STEP_CFG),
+        .phase_step_cfg(sync_phase_step_cfg),
         .sample_count_cfg(ADC_SYNC_SAMPLE_COUNT_CFG),
         .busy(adc_sync_busy),
         .done(adc_sync_done),
@@ -658,6 +721,8 @@ module pynq_adc_system_top #(
                                                 ADC_WAVE_FLAGS_DONE |
                                                 ADC_WAVE_FLAGS_FREQ_VALID |
                                                 ADC_WAVE_FLAGS_DFT_VALID |
+                                                ADC_WAVE_FLAGS_PHASE_VALID |
+                                                (adc_rate_clamped_cfg ? ADC_WAVE_FLAGS_ADC_RATE_CLAMPED : 32'd0) |
                                                 (adc_overrange_seen ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
                                                 ((adc_a_min_raw == 12'd0 || adc_a_max_raw == 12'd4095 ||
                                                   adc_b_min_raw == 12'd0 || adc_b_max_raw == 12'd4095) ? ADC_WAVE_FLAGS_CLIP : 32'd0) |
@@ -1265,7 +1330,11 @@ module pynq_adc_system_top #(
     // byte 36 raw_b_vpp_code u32 LE
     // byte 40 gain_x1000 i32 LE, current baseline 0; ESP32 computes gain
     // byte 44 phase_deg_x10 i32 LE, sync_detector phase difference B-A
-    // byte 48 flags u32 LE
+    // byte 48 flags u32 LE. Existing low bits are preserved:
+    // bit0 overrange, bit1 done, bit2 valid, bit3 raw, bit4 clip,
+    // bit5 freq_valid, bit6 dft_valid. Added bits: bit8 adc_rate_clamped,
+    // bit9 phase_valid, bit10 cordic_order_uncertain. Bits 16..23 carry
+    // sync_detector debug_flags[7:0].
     // byte 52..115 reserved 0, byte 116 checksum xor(frame[0..115]), 117..127 padding 0
     reg [1023:0] frame_0x13_live;
     reg [7:0] f13_chk;

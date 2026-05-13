@@ -3,6 +3,8 @@
 module sync_detector #(
     parameter integer DEFAULT_SAMPLE_COUNT = 4096,
     parameter integer CORDIC_INPUT_SHIFT   = 9,
+    parameter         CORDIC_XY_SWAP       = 1'b0,
+    parameter         CORDIC_OUT_SWAP      = 1'b0,
     parameter         PHASE_SIGN_INVERT    = 1'b0
 ) (
     input  wire        clk,
@@ -27,14 +29,16 @@ module sync_detector #(
     output reg  [31:0] debug_flags
 );
 
-    // Xilinx CORDIC PG105 defines Cartesian tdata as X_IN in the least
-    // significant field and Y_IN in the next field. Translate output is
-    // X_OUT (magnitude) in the least significant field and PHASE_OUT above it.
-    // Leave these switches local so an A/B same-source ILA test can flip the
-    // interpretation without touching the sampling path if the generated IP
-    // configuration is found to differ.
-    localparam CORDIC_XY_SWAP  = 1'b0;
-    localparam CORDIC_OUT_SWAP = 1'b0;
+    // CORDIC debug switches:
+    // CORDIC_XY_SWAP=0 assumes X/I is tdata[31:0] and Y/Q is tdata[63:32].
+    // CORDIC_OUT_SWAP=0 assumes magnitude is dout[31:0] and phase is dout[63:32].
+    // PHASE_SIGN_INVERT=0 reports phase_b - phase_a.
+    // Hardware check: feed A/B from the same 10 kHz 2 Vpp sine, phase_diff
+    // should be near 0 deg. If phase is near +/-90 deg or unstable, check
+    // CORDIC_XY_SWAP, Q sign, and the sin/cos ROM alignment. If magnitude and
+    // phase look exchanged, check CORDIC_OUT_SWAP. If same-source is near 0
+    // but an RC test has the opposite sign, check PHASE_SIGN_INVERT. Do not
+    // solve phase sign by changing XDC pin constraints.
 
     localparam [3:0] ST_IDLE   = 4'd0;
     localparam [3:0] ST_ACCUM  = 4'd1;
@@ -58,8 +62,8 @@ module sync_detector #(
     reg [3:0] state = ST_IDLE;
 
     reg [11:0] phase_acc = 12'd0;
-    reg [11:0] lut_addr = 12'd0;
-    reg        lut_ena = 1'b0;
+    wire [11:0] lut_addra = phase_acc[11:0];
+    wire        lut_ena = (state == ST_ACCUM) && sample_valid;
     wire signed [15:0] sin_q15;
     wire signed [15:0] cos_q15;
 
@@ -95,10 +99,12 @@ module sync_detector #(
     wire signed [12:0] sample_a_centered = {1'b0, sample_a_raw} - 13'sd2048;
     wire signed [12:0] sample_b_centered = {1'b0, sample_b_raw} - 13'sd2048;
 
-    wire signed [28:0] mult_a_i = center_a_d2 * cos_q15;
-    wire signed [28:0] mult_a_q = center_a_d2 * sin_q15;
-    wire signed [28:0] mult_b_i = center_b_d2 * cos_q15;
-    wire signed [28:0] mult_b_q = center_b_d2 * sin_q15;
+    wire signed [12:0] center_a_aligned = center_a_d2;
+    wire signed [12:0] center_b_aligned = center_b_d2;
+    wire signed [28:0] mult_a_i = center_a_aligned * cos_q15;
+    wire signed [28:0] mult_a_q = center_a_aligned * sin_q15;
+    wire signed [28:0] mult_b_i = center_b_aligned * cos_q15;
+    wire signed [28:0] mult_b_q = center_b_aligned * sin_q15;
 
     wire signed [47:0] mult_a_i_ext = {{19{mult_a_i[28]}}, mult_a_i};
     wire signed [47:0] mult_a_q_ext = {{19{mult_a_q[28]}}, mult_a_q};
@@ -162,14 +168,14 @@ module sync_detector #(
     sin_lut_bram u_sin_lut_bram (
         .clka(clk),
         .ena(lut_ena),
-        .addra(lut_addr),
+        .addra(lut_addra),
         .douta(sin_q15)
     );
 
     cos_lut_bram u_cos_lut_bram (
         .clka(clk),
         .ena(lut_ena),
-        .addra(lut_addr),
+        .addra(lut_addra),
         .douta(cos_q15)
     );
 
@@ -195,8 +201,6 @@ module sync_detector #(
             phase_diff_raw <= 32'sd0;
             debug_flags <= 32'd0;
             phase_acc <= 12'd0;
-            lut_addr <= 12'd0;
-            lut_ena <= 1'b0;
             valid_d0 <= 1'b0;
             valid_d1 <= 1'b0;
             valid_d2 <= 1'b0;
@@ -218,8 +222,6 @@ module sync_detector #(
             cordic_in_valid <= 1'b0;
             cordic_in_data <= 64'd0;
         end else begin
-            lut_ena <= 1'b0;
-
             if (start) begin
                 state <= ST_ACCUM;
                 busy <= 1'b1;
@@ -232,7 +234,6 @@ module sync_detector #(
                 phase_diff_raw <= 32'sd0;
                 debug_flags <= DBG_ACCUM_ACTIVE;
                 phase_acc <= 12'd0;
-                lut_addr <= 12'd0;
                 valid_d0 <= 1'b0;
                 valid_d1 <= 1'b0;
                 valid_d2 <= 1'b0;
@@ -264,9 +265,10 @@ module sync_detector #(
                     end
 
                     ST_ACCUM: begin
+                        // sin_lut_bram/cos_lut_bram are synchronous ROMs with
+                        // 2-clock read latency; centered samples are delayed
+                        // by 2 clocks to align with sin_q15/cos_q15.
                         if (sample_valid) begin
-                            lut_ena <= 1'b1;
-                            lut_addr <= phase_acc;
                             phase_acc <= phase_acc + phase_step_cfg;
                             center_a_d0 <= sample_a_centered;
                             center_b_d0 <= sample_b_centered;
