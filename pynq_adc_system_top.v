@@ -29,10 +29,13 @@ module pynq_adc_system_top #(
     output wire dds_spi_sclk,
     output wire dds_spi_cs_n,
 
-    // AD9226 channel A (first-stage ADC waveform test)
+    // AD9226 A/B dual-channel capture
     output wire adc_a_clk,
     input  wire [11:0] adc_a_data,
-    input  wire adc_a_ora
+    input  wire adc_a_ora,
+    output wire adc_b_clk,
+    input  wire [11:0] adc_b_data,
+    input  wire adc_b_orb
 );
 
     // ============================================================
@@ -264,12 +267,13 @@ module pynq_adc_system_top #(
     integer ii;
 
     // ============================================================
-    // AD9226 channel A capture block
+    // AD9226 A/B dual-channel capture block
     // ============================================================
     localparam [31:0] ADC_A_SAMPLE_HZ = 32'd100000;
-    localparam integer ADC_A_SAMPLE_COUNT = 256;
-    localparam [31:0] ADC_A_SAMPLE_COUNT_U32 = 32'd256;
-    localparam integer ADC_A_SAMPLE_DELAY_CLKS = 2;
+    localparam integer ADC_A_SAMPLE_COUNT = 4096;
+    localparam [31:0] ADC_A_SAMPLE_COUNT_U32 = 32'd4096;
+    localparam integer ADC_A_CLK_HALF_PERIOD_CLKS = 625;
+    localparam integer ADC_A_SAMPLE_DELAY_CLKS = 40;
     localparam integer ADC_WAVE_SAMPLES_PER_CHUNK = 30;
     localparam [31:0] ADC_WAVE_CHUNK_COUNT =
         (ADC_A_SAMPLE_COUNT + ADC_WAVE_SAMPLES_PER_CHUNK - 1) / ADC_WAVE_SAMPLES_PER_CHUNK;
@@ -285,20 +289,29 @@ module pynq_adc_system_top #(
     localparam [31:0] ADC_DISPLAY_SAMPLE_COUNT_U32 = 32'd256;
     localparam [31:0] ADC_DISPLAY_DECIMATION = 32'd1;
 
-    reg adc_a_capture_start = 1'b0;
-    wire adc_a_capture_busy;
-    wire adc_a_capture_done;
-    wire [15:0] adc_a_sample_index;
+    reg adc_capture_start = 1'b0;
+    reg adc_capture_started = 1'b0;
+    wire adc_capture_busy;
+    wire adc_capture_done;
+    wire [15:0] adc_sample_index;
     wire [11:0] adc_a_sample_raw;
-    wire signed [15:0] adc_a_sample_mv;
-    wire adc_a_sample_valid;
-    wire signed [15:0] adc_a_min_mv;
-    wire signed [15:0] adc_a_max_mv;
-    wire signed [31:0] adc_a_sum_mv;
+    wire [11:0] adc_b_sample_raw;
+    wire signed [15:0] adc_a_sample_mv = 16'sd0;
+    wire adc_sample_valid;
+    wire signed [15:0] adc_a_min_mv = 16'sd0;
+    wire signed [15:0] adc_a_max_mv = 16'sd0;
+    wire signed [31:0] adc_a_sum_mv = 32'sd0;
     wire [11:0] adc_a_min_raw;
     wire [11:0] adc_a_max_raw;
+    wire [11:0] adc_a_vpp_raw;
     wire [31:0] adc_a_sum_raw;
-    wire adc_a_overrange_seen;
+    wire [11:0] adc_b_min_raw;
+    wire [11:0] adc_b_max_raw;
+    wire [11:0] adc_b_vpp_raw;
+    wire [31:0] adc_b_sum_raw;
+    wire adc_a_ora_sync;
+    wire adc_b_orb_sync;
+    wire adc_overrange_seen;
 
     reg [15:0] adc_sample_ram [0:ADC_A_SAMPLE_COUNT-1];
     reg [31:0] adc_wave_seq = 32'd0;
@@ -331,42 +344,48 @@ module pynq_adc_system_top #(
         (adc_wave_overrange ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
         (ADC_WAVE_RAW_DEBUG ? ADC_WAVE_FLAGS_RAW : 32'd0);
 
-    ad9226_ch_a_capture #(
-        .CLK_HZ(125000000),
-        .ADC_SAMPLE_HZ(ADC_A_SAMPLE_HZ),
-        .SAMPLE_COUNT(ADC_A_SAMPLE_COUNT),
-        .SAMPLE_DELAY_CLKS(ADC_A_SAMPLE_DELAY_CLKS)
-    ) u_ad9226_ch_a_capture (
+    ad9226_capture_dual #(
+        .ADC_CLK_HALF_PERIOD_CLKS(ADC_A_CLK_HALF_PERIOD_CLKS),
+        .SAMPLE_DELAY_CLKS(ADC_A_SAMPLE_DELAY_CLKS),
+        .SAMPLE_COUNT(ADC_A_SAMPLE_COUNT)
+    ) u_ad9226_capture_dual (
         .clk(clk_125m),
         .rst(rst),
-        .start(adc_a_capture_start),
-        .busy(adc_a_capture_busy),
-        .done(adc_a_capture_done),
+        .start(adc_capture_start),
+        .busy(adc_capture_busy),
+        .done(adc_capture_done),
         .adc_a_clk(adc_a_clk),
+        .adc_b_clk(adc_b_clk),
         .adc_a_data(adc_a_data),
+        .adc_b_data(adc_b_data),
         .adc_a_ora(adc_a_ora),
-        .sample_index(adc_a_sample_index),
-        .sample_raw(adc_a_sample_raw),
-        .sample_mv(adc_a_sample_mv),
-        .sample_valid(adc_a_sample_valid),
-        .min_mv(adc_a_min_mv),
-        .max_mv(adc_a_max_mv),
-        .sum_mv(adc_a_sum_mv),
-        .min_raw(adc_a_min_raw),
-        .max_raw(adc_a_max_raw),
-        .sum_raw(adc_a_sum_raw),
-        .overrange_seen(adc_a_overrange_seen)
+        .adc_b_orb(adc_b_orb),
+        .sample_index(adc_sample_index),
+        .sample_a_raw(adc_a_sample_raw),
+        .sample_b_raw(adc_b_sample_raw),
+        .sample_valid(adc_sample_valid),
+        .min_a_raw(adc_a_min_raw),
+        .max_a_raw(adc_a_max_raw),
+        .vpp_a_raw(adc_a_vpp_raw),
+        .sum_a_raw(adc_a_sum_raw),
+        .min_b_raw(adc_b_min_raw),
+        .max_b_raw(adc_b_max_raw),
+        .vpp_b_raw(adc_b_vpp_raw),
+        .sum_b_raw(adc_b_sum_raw),
+        .adc_a_ora_sync(adc_a_ora_sync),
+        .adc_b_orb_sync(adc_b_orb_sync),
+        .overrange_seen(adc_overrange_seen)
     );
 
     always @(posedge clk_125m) begin
         if (rst) begin
             for (ii = 0; ii < ADC_A_SAMPLE_COUNT; ii = ii + 1)
                 adc_sample_ram[ii] <= 16'd0;
-        end else if (adc_a_sample_valid && adc_a_sample_index < ADC_A_SAMPLE_COUNT) begin
+        end else if (adc_sample_valid && adc_sample_index < ADC_A_SAMPLE_COUNT) begin
             if (ADC_WAVE_RAW_DEBUG)
-                adc_sample_ram[adc_a_sample_index] <= {4'd0, adc_a_sample_raw};
+                adc_sample_ram[adc_sample_index] <= {4'd0, adc_a_sample_raw};
             else
-                adc_sample_ram[adc_a_sample_index] <= adc_a_sample_mv;
+                adc_sample_ram[adc_sample_index] <= adc_a_sample_mv;
         end
     end
 
@@ -412,7 +431,8 @@ module pynq_adc_system_top #(
             spi_b_timeout <= 32'd0;
             dds_ack_retry_count <= 2'd0;
             stop_frame_sent <= 1'b0;
-            adc_a_capture_start <= 1'b0;
+            adc_capture_start <= 1'b0;
+            adc_capture_started <= 1'b0;
             adc_wave_seq <= 32'd0;
             adc_wave_chunk_index <= 32'd0;
             adc_wave_send_active <= 1'b0;
@@ -435,7 +455,7 @@ module pynq_adc_system_top #(
             adc_wave_prep_index <= 8'd0;
             adc_wave_prep_sample_index <= 32'd0;
         end else begin
-            adc_a_capture_start <= 1'b0;
+            adc_capture_start <= 1'b0;
 
             // Process ESP commands generated by the SPI-A parser.
             // Do not drive esp_cmd_valid here; the parser owns that pulse.
@@ -563,37 +583,52 @@ module pynq_adc_system_top #(
                 end
 
                 ST_WAIT_SETTLE: begin
-                    if (settle_cnt >= SETTLE_CLKS)
+                    if (settle_cnt >= SETTLE_CLKS) begin
+                        adc_capture_started <= 1'b0;
                         state <= ST_ADC_CAPTURE;
-                    else
+                    end else begin
                         settle_cnt <= settle_cnt + 32'd1;
+                    end
                 end
 
                 ST_ADC_CAPTURE: begin
-                    // Fake measurement - compute RC low-pass model
-                    // ratio_m10 = (freq_hz * 10000) / fc, where fc=1590
-                    // Gain approximation (gain_x1000)
-                    stat_current_freq <= current_freq_hz;
-                    stat_point_index <= point_index;
-
-                    // Compute fake data
-                    stat_vin_mv <= 32'd995 + {27'd0, point_index[4:0]};
-                    stat_vout_mv <= fake_vout;
-                    stat_gain_x1000 <= fake_gain;
-                    stat_theory_gain <= fake_theory;
-                    stat_error_x10 <= fake_error;
-                    stat_phase_deg_x10 <= fake_phase;
-                    stat_filter_type <= 32'd1;
-                    stat_cutoff_freq <= 32'd1590;
-
-                    stat_progress <= (point_index * 32'd1000) / total_points;
-
-                    state <= ST_SEND_RESULT;
+                    if (!adc_capture_started) begin
+                        adc_capture_start <= 1'b1;
+                        adc_capture_started <= 1'b1;
+                    end else if (adc_capture_done) begin
+                        stat_current_freq <= current_freq_hz;
+                        stat_point_index <= point_index;
+                        stat_vin_mv <= {20'd0, adc_a_vpp_raw};
+                        stat_vout_mv <= {20'd0, adc_b_vpp_raw};
+                        stat_gain_x1000 <= (adc_a_vpp_raw != 12'd0) ?
+                            (({20'd0, adc_b_vpp_raw} * 32'd1000) / {20'd0, adc_a_vpp_raw}) :
+                            32'd0;
+                        stat_theory_gain <= 32'd0;
+                        stat_error_x10 <= 32'd0;
+                        stat_phase_deg_x10 <= 32'd0;
+                        stat_filter_type <= 32'd1;
+                        stat_cutoff_freq <= 32'd1590;
+                        stat_progress <= (point_index * 32'd1000) / total_points;
+                        adc_wave_seq <= adc_wave_seq + 32'd1;
+                        adc_result_measured_freq_hz <= current_freq_hz;
+                        adc_result_amp_peak_raw <= {20'd0, adc_a_vpp_raw} >> 1;
+                        adc_result_amp_rms_raw <= {20'd0, adc_b_vpp_raw} >> 1;
+                        adc_result_phase_deg_x10 <= 32'sd0;
+                        adc_result_flags <= ADC_WAVE_FLAGS_VALID |
+                                            ADC_WAVE_FLAGS_DONE |
+                                            ADC_WAVE_FLAGS_FREQ_VALID |
+                                            (adc_overrange_seen ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
+                                            ((adc_a_min_raw == 12'd0 || adc_a_max_raw == 12'd4095 ||
+                                              adc_b_min_raw == 12'd0 || adc_b_max_raw == 12'd4095) ? ADC_WAVE_FLAGS_CLIP : 32'd0);
+                        adc_result_send_active <= 1'b1;
+                        adc_capture_started <= 1'b0;
+                        state <= ST_SEND_RESULT;
+                    end
                 end
 
                 ST_SEND_RESULT: begin
-                    // Status updated, SPI-A sends automatically
-                    state <= ST_NEXT_FREQ;
+                    if (!adc_result_send_active)
+                        state <= ST_NEXT_FREQ;
                 end
 
                 ST_NEXT_FREQ: begin
@@ -722,7 +757,8 @@ module pynq_adc_system_top #(
 
                 ST_ADC_TEST_SETTLE: begin
                     if (settle_cnt >= DDS_ACK_TIMEOUT_CLKS) begin
-                        adc_a_capture_start <= 1'b1;
+                        adc_capture_start <= 1'b1;
+                        adc_capture_started <= 1'b1;
                         stat_progress <= 32'd250;
                         state <= ST_ADC_TEST_CAPTURE;
                     end else begin
@@ -731,18 +767,18 @@ module pynq_adc_system_top #(
                 end
 
                 ST_ADC_TEST_CAPTURE: begin
-                    if (adc_a_capture_done) begin
+                    if (adc_capture_done) begin
                         adc_wave_seq <= adc_wave_seq + 32'd1;
                         adc_wave_chunk_index <= 32'd0;
-                        adc_wave_send_active <= 1'b1;
+                        adc_wave_send_active <= 1'b0;
                         if (ADC_WAVE_RAW_DEBUG) begin
                             adc_wave_min_mv <= {4'd0, adc_a_min_raw};
                             adc_wave_max_mv <= {4'd0, adc_a_max_raw};
                             adc_wave_sum_mv <= adc_a_sum_raw;
                             adc_wave_mean_mv <= adc_a_sum_raw / ADC_A_SAMPLE_COUNT;
-                            adc_wave_vpp_mv <= {20'd0, adc_a_max_raw} - {20'd0, adc_a_min_raw};
-                            stat_vin_mv <= adc_a_sum_raw / ADC_A_SAMPLE_COUNT;
-                            stat_vout_mv <= {20'd0, adc_a_max_raw} - {20'd0, adc_a_min_raw};
+                            adc_wave_vpp_mv <= {20'd0, adc_a_vpp_raw};
+                            stat_vin_mv <= {20'd0, adc_a_vpp_raw};
+                            stat_vout_mv <= {20'd0, adc_b_vpp_raw};
                         end else begin
                             adc_wave_min_mv <= adc_a_min_mv;
                             adc_wave_max_mv <= adc_a_max_mv;
@@ -754,23 +790,26 @@ module pynq_adc_system_top #(
                             stat_vout_mv <= {{16{adc_a_max_mv[15]}}, adc_a_max_mv} -
                                             {{16{adc_a_min_mv[15]}}, adc_a_min_mv};
                         end
-                        adc_wave_overrange <= adc_a_overrange_seen;
+                        adc_wave_overrange <= adc_overrange_seen;
                         adc_result_flags <= ADC_WAVE_FLAGS_VALID |
                                             ADC_WAVE_FLAGS_DONE |
                                             ADC_WAVE_FLAGS_RAW |
                                             ADC_WAVE_FLAGS_FREQ_VALID |
                                             ADC_WAVE_FLAGS_DFT_VALID |
-                                            (adc_a_overrange_seen ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
+                                            (adc_overrange_seen ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
                                             ((adc_a_min_raw == 12'd0 || adc_a_max_raw == 12'd4095) ? ADC_WAVE_FLAGS_CLIP : 32'd0);
                         adc_result_raw_rms <= adc_a_sum_raw / ADC_A_SAMPLE_COUNT;
                         adc_result_measured_freq_hz <= ADC_TEST_DDS_FREQ_HZ;
-                        adc_result_amp_peak_raw <= adc_raw_vpp_u32 >> 1;
-                        adc_result_amp_rms_raw <= adc_raw_vpp_u32 >> 2;
+                        adc_result_amp_peak_raw <= {20'd0, adc_a_vpp_raw} >> 1;
+                        adc_result_amp_rms_raw <= {20'd0, adc_b_vpp_raw} >> 1;
                         adc_result_phase_deg_x10 <= 32'sd0;
                         adc_result_zero_cross_count <= 32'd3;
-                        stat_gain_x1000 <= 32'd0;
+                        stat_gain_x1000 <= (adc_a_vpp_raw != 12'd0) ?
+                            (({20'd0, adc_b_vpp_raw} * 32'd1000) / {20'd0, adc_a_vpp_raw}) :
+                            32'd0;
                         stat_phase_deg_x10 <= 32'd0;
                         stat_progress <= 32'd700;
+                        adc_capture_started <= 1'b0;
                         state <= ST_ADC_TEST_ANALYZE;
                     end
                 end
@@ -899,8 +938,8 @@ module pynq_adc_system_top #(
                     stat_state <= STATE_SCANNING;
                     stat_progress <= 32'd875;
                     if (!adc_result_send_active) begin
-                        stat_progress <= 32'd900;
-                        state <= ST_ADC_TEST_PREP_WAVE_CHUNK;
+                        stat_progress <= 32'd1000;
+                        state <= ST_ADC_TEST_DONE;
                     end
                 end
 
@@ -1079,8 +1118,7 @@ module pynq_adc_system_top #(
     reg [31:0] adc_wave_chunk_gap_cnt = 32'd0;
     reg        spi_a_start = 1'b0;
     wire       adc_result_tx_pending = adc_result_send_active;
-    wire       adc_wave_tx_pending =
-        adc_wave_send_active && (state == ST_ADC_TEST_SEND_WAVE);
+    wire       adc_wave_tx_pending = 1'b0;
     wire [1023:0] spi_a_tx_frame;
 
     always @(posedge clk_125m) begin
@@ -1168,7 +1206,81 @@ module pynq_adc_system_top #(
     // 0x12 frame_0x12_reg and 0x13 frame_0x13_reg are built in
     // ST_ADC_TEST_PREP_WAVE_CHUNK / ST_ADC_TEST_PREP_RESULT.
 
-    assign spi_a_tx_frame = adc_result_tx_pending ? frame_0x13_reg :
+    // 0x13 point result frame. Payload fields are raw ADC codes; ESP32 converts
+    // code units to volts/gain display units.
+    reg [1023:0] frame_0x13_live;
+    reg [7:0] f13_chk;
+    integer f13_i;
+
+    always @* begin
+        frame_0x13_live = 1024'd0;
+        frame_0x13_live[0*8 +: 8] = 8'hA5;
+        frame_0x13_live[1*8 +: 8] = 8'h5A;
+        frame_0x13_live[2*8 +: 8] = 8'h13;
+        frame_0x13_live[3*8 +: 8] = 8'd112;
+
+        frame_0x13_live[4*8 +: 8] = adc_wave_seq[7:0];
+        frame_0x13_live[5*8 +: 8] = adc_wave_seq[15:8];
+        frame_0x13_live[6*8 +: 8] = adc_wave_seq[23:16];
+        frame_0x13_live[7*8 +: 8] = adc_wave_seq[31:24];
+
+        frame_0x13_live[8*8 +: 8] = point_index[7:0];
+        frame_0x13_live[9*8 +: 8] = point_index[15:8];
+        frame_0x13_live[10*8 +: 8] = point_index[23:16];
+        frame_0x13_live[11*8 +: 8] = point_index[31:24];
+
+        frame_0x13_live[12*8 +: 8] = total_points[7:0];
+        frame_0x13_live[13*8 +: 8] = total_points[15:8];
+        frame_0x13_live[14*8 +: 8] = total_points[23:16];
+        frame_0x13_live[15*8 +: 8] = total_points[31:24];
+
+        frame_0x13_live[16*8 +: 8] = current_freq_hz[7:0];
+        frame_0x13_live[17*8 +: 8] = current_freq_hz[15:8];
+        frame_0x13_live[18*8 +: 8] = current_freq_hz[23:16];
+        frame_0x13_live[19*8 +: 8] = current_freq_hz[31:24];
+
+        frame_0x13_live[20*8 +: 8] = adc_result_measured_freq_hz[7:0];
+        frame_0x13_live[21*8 +: 8] = adc_result_measured_freq_hz[15:8];
+        frame_0x13_live[22*8 +: 8] = adc_result_measured_freq_hz[23:16];
+        frame_0x13_live[23*8 +: 8] = adc_result_measured_freq_hz[31:24];
+
+        frame_0x13_live[24*8 +: 8] = adc_result_amp_peak_raw[7:0];
+        frame_0x13_live[25*8 +: 8] = adc_result_amp_peak_raw[15:8];
+        frame_0x13_live[26*8 +: 8] = adc_result_amp_peak_raw[23:16];
+        frame_0x13_live[27*8 +: 8] = adc_result_amp_peak_raw[31:24];
+
+        frame_0x13_live[28*8 +: 8] = adc_result_amp_rms_raw[7:0];
+        frame_0x13_live[29*8 +: 8] = adc_result_amp_rms_raw[15:8];
+        frame_0x13_live[30*8 +: 8] = adc_result_amp_rms_raw[23:16];
+        frame_0x13_live[31*8 +: 8] = adc_result_amp_rms_raw[31:24];
+
+        frame_0x13_live[32*8 +: 8] = adc_a_vpp_raw[7:0];
+        frame_0x13_live[33*8 +: 8] = adc_a_vpp_raw[11:8];
+        frame_0x13_live[36*8 +: 8] = adc_b_vpp_raw[7:0];
+        frame_0x13_live[37*8 +: 8] = adc_b_vpp_raw[11:8];
+
+        frame_0x13_live[40*8 +: 8] = stat_gain_x1000[7:0];
+        frame_0x13_live[41*8 +: 8] = stat_gain_x1000[15:8];
+        frame_0x13_live[42*8 +: 8] = stat_gain_x1000[23:16];
+        frame_0x13_live[43*8 +: 8] = stat_gain_x1000[31:24];
+
+        frame_0x13_live[44*8 +: 8] = adc_result_phase_deg_x10[7:0];
+        frame_0x13_live[45*8 +: 8] = adc_result_phase_deg_x10[15:8];
+        frame_0x13_live[46*8 +: 8] = adc_result_phase_deg_x10[23:16];
+        frame_0x13_live[47*8 +: 8] = adc_result_phase_deg_x10[31:24];
+
+        frame_0x13_live[48*8 +: 8] = adc_result_flags[7:0];
+        frame_0x13_live[49*8 +: 8] = adc_result_flags[15:8];
+        frame_0x13_live[50*8 +: 8] = adc_result_flags[23:16];
+        frame_0x13_live[51*8 +: 8] = adc_result_flags[31:24];
+
+        f13_chk = 8'd0;
+        for (f13_i = 0; f13_i < 116; f13_i = f13_i + 1)
+            f13_chk = f13_chk ^ frame_0x13_live[f13_i*8 +: 8];
+        frame_0x13_live[116*8 +: 8] = f13_chk;
+    end
+
+    assign spi_a_tx_frame = adc_result_tx_pending ? frame_0x13_live :
                             (adc_wave_tx_pending ? frame_0x12_reg : frame_0x10);
 
     spi_master_128b #(.CLK_DIV_HALF(SPI_A_CLK_DIV_HALF)) u_spi_a (
