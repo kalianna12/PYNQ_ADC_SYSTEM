@@ -279,9 +279,15 @@ module pynq_adc_system_top #(
     localparam        ADC_WAVE_RAW_DEBUG       = 1'b1;
     localparam [31:0] ADC_DISPLAY_SAMPLE_COUNT_U32 = 32'd256;
     localparam [31:0] ADC_DISPLAY_DECIMATION = 32'd1;
+    // First DFT bring-up uses a fixed coherent LUT step, M=128 samples/cycle.
+    // TODO: derive this from the selected DDS frequency and ADC sample clock
+    // once the sweep frequency plan is locked to coherent sample windows.
+    localparam [11:0] ADC_SYNC_PHASE_STEP_CFG = 12'd32;
+    localparam [15:0] ADC_SYNC_SAMPLE_COUNT_CFG = 16'd4096;
 
     reg adc_capture_start = 1'b0;
     reg adc_capture_started = 1'b0;
+    reg adc_capture_done_latched = 1'b0;
     wire adc_capture_busy;
     wire adc_capture_done;
     wire [15:0] adc_sample_index;
@@ -303,6 +309,15 @@ module pynq_adc_system_top #(
     wire adc_a_ora_sync;
     wire adc_b_orb_sync;
     wire adc_overrange_seen;
+    wire adc_sync_busy;
+    wire adc_sync_done;
+    wire [31:0] adc_sync_amp_a_code;
+    wire [31:0] adc_sync_amp_b_code;
+    wire signed [31:0] adc_sync_phase_deg_x10;
+    wire signed [31:0] adc_sync_phase_a_raw;
+    wire signed [31:0] adc_sync_phase_b_raw;
+    wire signed [31:0] adc_sync_phase_diff_raw;
+    wire [31:0] adc_sync_debug_flags;
 
     reg [15:0] adc_sample_ram [0:ADC_A_SAMPLE_COUNT-1];
     reg [31:0] adc_wave_seq = 32'd0;
@@ -368,6 +383,30 @@ module pynq_adc_system_top #(
         .overrange_seen(adc_overrange_seen)
     );
 
+    sync_detector #(
+        .DEFAULT_SAMPLE_COUNT(ADC_A_SAMPLE_COUNT),
+        .CORDIC_INPUT_SHIFT(9),
+        .PHASE_SIGN_INVERT(1'b0)
+    ) u_sync_detector (
+        .clk(clk_125m),
+        .rst(rst),
+        .start(adc_capture_start),
+        .sample_valid(adc_sample_valid),
+        .sample_a_raw(adc_a_sample_raw),
+        .sample_b_raw(adc_b_sample_raw),
+        .phase_step_cfg(ADC_SYNC_PHASE_STEP_CFG),
+        .sample_count_cfg(ADC_SYNC_SAMPLE_COUNT_CFG),
+        .busy(adc_sync_busy),
+        .done(adc_sync_done),
+        .amp_a_code(adc_sync_amp_a_code),
+        .amp_b_code(adc_sync_amp_b_code),
+        .phase_deg_x10(adc_sync_phase_deg_x10),
+        .phase_a_raw(adc_sync_phase_a_raw),
+        .phase_b_raw(adc_sync_phase_b_raw),
+        .phase_diff_raw(adc_sync_phase_diff_raw),
+        .debug_flags(adc_sync_debug_flags)
+    );
+
     always @(posedge clk_125m) begin
         if (rst) begin
             for (ii = 0; ii < ADC_A_SAMPLE_COUNT; ii = ii + 1)
@@ -424,6 +463,7 @@ module pynq_adc_system_top #(
             stop_frame_sent <= 1'b0;
             adc_capture_start <= 1'b0;
             adc_capture_started <= 1'b0;
+            adc_capture_done_latched <= 1'b0;
             adc_wave_seq <= 32'd0;
             adc_wave_chunk_index <= 32'd0;
             adc_wave_send_active <= 1'b0;
@@ -590,33 +630,43 @@ module pynq_adc_system_top #(
                     if (!adc_capture_started) begin
                         adc_capture_start <= 1'b1;
                         adc_capture_started <= 1'b1;
-                    end else if (adc_capture_done) begin
-                        stat_current_freq <= current_freq_hz;
-                        stat_point_index <= point_index;
-                        stat_vin_mv <= {20'd0, adc_a_vpp_raw};
-                        stat_vout_mv <= {20'd0, adc_b_vpp_raw};
-                        stat_gain_x1000 <= 32'd0;
-                        stat_theory_gain <= 32'd0;
-                        stat_error_x10 <= 32'd0;
-                        stat_phase_deg_x10 <= 32'd0;
-                        stat_filter_type <= 32'd0;
-                        stat_cutoff_freq <= 32'd0;
-                        stat_progress <= (point_index * 32'd1000) / total_points;
-                        adc_wave_seq <= adc_wave_seq + 32'd1;
-                        adc_result_measured_freq_hz <= current_freq_hz;
-                        // Current baseline sends raw Vpp code. ESP32 converts to mV/gain.
-                        adc_result_amp_peak_raw <= {20'd0, adc_a_vpp_raw};
-                        adc_result_amp_rms_raw <= {20'd0, adc_b_vpp_raw};
-                        adc_result_phase_deg_x10 <= 32'sd0;
-                        adc_result_flags <= ADC_WAVE_FLAGS_VALID |
-                                            ADC_WAVE_FLAGS_DONE |
-                                            ADC_WAVE_FLAGS_FREQ_VALID |
-                                            (adc_overrange_seen ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
-                                            ((adc_a_min_raw == 12'd0 || adc_a_max_raw == 12'd4095 ||
-                                              adc_b_min_raw == 12'd0 || adc_b_max_raw == 12'd4095) ? ADC_WAVE_FLAGS_CLIP : 32'd0);
-                        adc_result_send_active <= 1'b1;
-                        adc_capture_started <= 1'b0;
-                        state <= ST_SEND_RESULT;
+                        adc_capture_done_latched <= 1'b0;
+                    end else begin
+                        if (adc_capture_done)
+                            adc_capture_done_latched <= 1'b1;
+
+                        if ((adc_capture_done || adc_capture_done_latched) && adc_sync_done) begin
+                            stat_current_freq <= current_freq_hz;
+                            stat_point_index <= point_index;
+                            stat_vin_mv <= {20'd0, adc_a_vpp_raw};
+                            stat_vout_mv <= {20'd0, adc_b_vpp_raw};
+                            stat_gain_x1000 <= 32'd0;
+                            stat_theory_gain <= 32'd0;
+                            stat_error_x10 <= 32'd0;
+                            stat_phase_deg_x10 <= adc_sync_phase_deg_x10;
+                            stat_filter_type <= 32'd0;
+                            stat_cutoff_freq <= 32'd0;
+                            stat_progress <= (point_index * 32'd1000) / total_points;
+                            adc_wave_seq <= adc_wave_seq + 32'd1;
+                            adc_result_measured_freq_hz <= current_freq_hz;
+                            // DFT/CORDIC magnitude is relative for now; raw Vpp below
+                            // remains the calibrated ESP32 display path.
+                            adc_result_amp_peak_raw <= adc_sync_amp_a_code;
+                            adc_result_amp_rms_raw <= adc_sync_amp_b_code;
+                            adc_result_phase_deg_x10 <= adc_sync_phase_deg_x10;
+                            adc_result_flags <= ADC_WAVE_FLAGS_VALID |
+                                                ADC_WAVE_FLAGS_DONE |
+                                                ADC_WAVE_FLAGS_FREQ_VALID |
+                                                ADC_WAVE_FLAGS_DFT_VALID |
+                                                (adc_overrange_seen ? ADC_WAVE_FLAGS_OVERRANGE : 32'd0) |
+                                                ((adc_a_min_raw == 12'd0 || adc_a_max_raw == 12'd4095 ||
+                                                  adc_b_min_raw == 12'd0 || adc_b_max_raw == 12'd4095) ? ADC_WAVE_FLAGS_CLIP : 32'd0) |
+                                                {8'd0, adc_sync_debug_flags[7:0], 16'd0};
+                            adc_result_send_active <= 1'b1;
+                            adc_capture_started <= 1'b0;
+                            adc_capture_done_latched <= 1'b0;
+                            state <= ST_SEND_RESULT;
+                        end
                     end
                 end
 
@@ -1101,6 +1151,7 @@ module pynq_adc_system_top #(
                 adc_wave_send_active <= 1'b0;
                 adc_wave_chunk_index <= 32'd0;
                 adc_wave_overrange <= 1'b0;
+                adc_capture_done_latched <= 1'b0;
             end
         end
     end
@@ -1208,12 +1259,12 @@ module pynq_adc_system_top #(
     // byte 12 total_points u32 LE
     // byte 16 freq_req_hz u32 LE
     // byte 20 freq_actual_hz u32 LE
-    // byte 24 amp_a_code u32 LE, current raw-Vpp baseline mirrors raw_a_vpp_code
-    // byte 28 amp_b_code u32 LE, current raw-Vpp baseline mirrors raw_b_vpp_code
+    // byte 24 amp_a_code u32 LE, sync_detector CORDIC magnitude for channel A
+    // byte 28 amp_b_code u32 LE, sync_detector CORDIC magnitude for channel B
     // byte 32 raw_a_vpp_code u32 LE
     // byte 36 raw_b_vpp_code u32 LE
     // byte 40 gain_x1000 i32 LE, current baseline 0; ESP32 computes gain
-    // byte 44 phase_deg_x10 i32 LE, current baseline 0 until DFT/CORDIC stage
+    // byte 44 phase_deg_x10 i32 LE, sync_detector phase difference B-A
     // byte 48 flags u32 LE
     // byte 52..115 reserved 0, byte 116 checksum xor(frame[0..115]), 117..127 padding 0
     reg [1023:0] frame_0x13_live;

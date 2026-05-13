@@ -2,6 +2,7 @@
 2018.2
 Jun 14 2018
 20:41:02
-G:/FIREFOX下载/2026DIANSAI/PYNQADC/ad9226_capture_dual.v,1778677053,systemVerilog,,G:/FIREFOX下载/2026DIANSAI/PYNQADC/pynq_adc_system_top.v,,ad9226_capture_dual,,,,,,,,
-G:/FIREFOX下载/2026DIANSAI/PYNQADC/pynq_adc_system_top.v,1778677161,systemVerilog,,,,pynq_adc_system_top,,,,,,,,
-G:/FIREFOX下载/2026DIANSAI/PYNQADC/spi_master_128b.v,1778607190,systemVerilog,,G:/FIREFOX下载/2026DIANSAI/PYNQADC/ad9226_capture_dual.v,,spi_master_128b,,,,,,,,
+G:/FIREFOX下载/2026DIANSAI/PYNQADC/ad9226_capture_dual.v,1778677053,verilog,,G:/FIREFOX下载/2026DIANSAI/PYNQADC/spi_master_128b.v,,ad9226_capture_dual,,,,,,,,
+G:/FIREFOX下载/2026DIANSAI/PYNQADC/pynq_adc_system_top.v,1778679983,verilog,,,,pynq_adc_system_top,,,,,,,,
+G:/FIREFOX下载/2026DIANSAI/PYNQADC/spi_master_128b.v,1778607190,verilog,,G:/FIREFOX下载/2026DIANSAI/PYNQADC/pynq_adc_system_top.v,,spi_master_128b,,,,,,,,
+G:/FIREFOX下载/2026DIANSAI/PYNQADC/sync_detector.v,1778680021,verilog,,G:/FIREFOX下载/2026DIANSAI/PYNQADC/ad9226_capture_dual.v,,sync_detector,,,,,,,,
