@@ -3,9 +3,9 @@
 module sync_detector #(
     parameter integer DEFAULT_SAMPLE_COUNT = 4096,
     parameter integer CORDIC_INPUT_SHIFT   = 9,
-    parameter         CORDIC_XY_SWAP       = 1'b0,
-    parameter         CORDIC_OUT_SWAP      = 1'b0,
-    parameter         PHASE_SIGN_INVERT    = 1'b0
+    parameter [0:0]   CORDIC_XY_SWAP       = 1'b0,
+    parameter [0:0]   CORDIC_OUT_SWAP      = 1'b0,
+    parameter [0:0]   PHASE_SIGN_INVERT    = 1'b0
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -63,7 +63,7 @@ module sync_detector #(
 
     reg [11:0] phase_acc = 12'd0;
     wire [11:0] lut_addra = phase_acc[11:0];
-    wire        lut_ena = (state == ST_ACCUM) && sample_valid;
+    wire        lut_ena = (state == ST_ACCUM);
     wire signed [15:0] sin_q15;
     wire signed [15:0] cos_q15;
 
