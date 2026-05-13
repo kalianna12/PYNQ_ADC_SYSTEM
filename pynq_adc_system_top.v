@@ -324,10 +324,7 @@ module pynq_adc_system_top #(
     reg [1023:0] frame_0x13_reg = 1024'd0;
     reg [7:0] adc_wave_prep_index = 8'd0;
     reg [31:0] adc_wave_prep_sample_index = 32'd0;
-    wire [15:0] adc_wave_sample_for_frame;
-    assign adc_wave_sample_for_frame =
-        (adc_wave_prep_sample_index < ADC_A_SAMPLE_COUNT) ?
-        adc_sample_ram[adc_wave_prep_sample_index] : 16'd0;
+    reg [15:0] adc_wave_sample_for_frame = 16'd0;
     wire [31:0] adc_wave_flags_now =
         ADC_WAVE_FLAGS_VALID |
         ((adc_wave_chunk_index >= (ADC_WAVE_CHUNK_COUNT - 1)) ? ADC_WAVE_FLAGS_DONE : 32'd0) |
@@ -931,6 +928,12 @@ module pynq_adc_system_top #(
                     end else begin
                         adc_wave_prep_sample_index = adc_wave_chunk_index * ADC_WAVE_SAMPLES_PER_CHUNK +
                             (adc_wave_prep_index - 8'd1);
+
+                        if (adc_wave_prep_sample_index < ADC_A_SAMPLE_COUNT)
+                            adc_wave_sample_for_frame = adc_sample_ram[adc_wave_prep_sample_index];
+                        else
+                            adc_wave_sample_for_frame = 16'd0;
+
                         frame_0x12_reg[(32 + (adc_wave_prep_index-8'd1)*2)*8 +: 8] <= adc_wave_sample_for_frame[7:0];
                         frame_0x12_reg[(33 + (adc_wave_prep_index-8'd1)*2)*8 +: 8] <= adc_wave_sample_for_frame[15:8];
                     end
