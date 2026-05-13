@@ -2,7 +2,7 @@ module pynq_adc_system_top #(
     parameter integer SPI_A_CLK_DIV_HALF  = 625,       // 125MHz/(2*625)=100kHz
     parameter integer SPI_A_PERIOD_CLKS   = 12500000,   // 100ms poll period
     parameter integer SPI_B_CLK_DIV_HALF  = 2500,       // 125MHz/(2*2500)=25kHz
-    parameter integer SETTLE_CLKS         = 125000,     // 1ms settle
+    parameter integer SETTLE_CLKS         = 1250000,    // 10ms settle
     parameter integer DDS_ACK_TIMEOUT_CLKS = 37500000   // 300ms timeout
 ) (
     input  wire clk_125m,
