@@ -39,6 +39,13 @@ module ad9226_capture_dual #(
     output reg         overrange_seen
 );
 
+    // Next DFT/synchronous-detection stage can replace these parameters with
+    // runtime config ports: adc_half_period_clks_cfg, sample_delay_clks_cfg,
+    // and sample_count_cfg. For the current raw-Vpp baseline they stay static.
+    localparam integer SAMPLE_DELAY_LOAD_INT =
+        (SAMPLE_DELAY_CLKS < 0) ? 0 :
+        (SAMPLE_DELAY_CLKS > 255) ? 255 : SAMPLE_DELAY_CLKS;
+
     localparam integer ADC_DIV_CNT_WIDTH =
         (ADC_CLK_HALF_PERIOD_CLKS <= 2)    ? 1 :
         (ADC_CLK_HALF_PERIOD_CLKS <= 4)    ? 2 :
@@ -130,7 +137,7 @@ module ad9226_capture_dual #(
 
                     if (!sample_delay_active && adc_a_clk_reg == 1'b0) begin
                         sample_delay_active <= 1'b1;
-                        sample_delay_cnt <= SAMPLE_DELAY_CLKS;
+                        sample_delay_cnt <= SAMPLE_DELAY_LOAD_INT;
                     end
                 end else begin
                     adc_clk_div_cnt <= adc_clk_div_cnt + 1'b1;

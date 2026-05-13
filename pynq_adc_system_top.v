@@ -102,6 +102,12 @@ module pynq_adc_system_top #(
     localparam [31:0] DDS_CMD_SET_SINGLE = 32'd4;
     localparam [31:0] DDS_CMD_STOP       = 32'd3;
 
+    // Formal baseline path uses DDS -> AD9226 A/B capture -> 0x13 raw-Vpp result.
+    // Legacy ADC/raw-wave/fake paths are kept for reference but unreachable by default.
+    localparam ENABLE_LEGACY_ADC_TEST = 1'b0;
+    localparam ENABLE_RAW_WAVE_TX     = 1'b0;
+    localparam ENABLE_FAKE_MEASURE    = 1'b0;
+
     reg [4:0]  state = ST_IDLE;
     reg [31:0] settle_cnt = 32'd0;
 
@@ -140,7 +146,7 @@ module pynq_adc_system_top #(
     // Status registers (for 0x10 frame)
     reg [31:0] stat_state         = STATE_IDLE;
     reg [31:0] stat_mode          = MODE_SWEEP;
-    reg [31:0] stat_filter_type   = 32'd1;  // Low-pass
+    reg [31:0] stat_filter_type   = 32'd0;  // Unknown in raw-Vpp baseline
     reg [31:0] stat_link_ok       = 32'd1;
     reg [31:0] stat_progress      = 32'd0;
     reg [31:0] stat_start_freq    = 32'd0;
@@ -156,7 +162,7 @@ module pynq_adc_system_top #(
     reg [31:0] stat_theory_gain   = 32'd0;
     reg [31:0] stat_error_x10     = 32'd0;
     reg [31:0] stat_phase_deg_x10 = 32'd0;
-    reg [31:0] stat_cutoff_freq   = 32'd1590;
+    reg [31:0] stat_cutoff_freq   = 32'd0;
 
     // ESP command parser state
     reg [31:0] esp_cmd      = 32'd0;
@@ -186,7 +192,7 @@ module pynq_adc_system_top #(
     localparam [31:0] ADC_TEST_DDS_FREQ_HZ = 32'd1000;
     localparam [31:0] ADC_TEST_DDS_SEQ     = 32'hADC00001;
 
-    wire adc_test_dds_state =
+    wire adc_test_dds_state = ENABLE_LEGACY_ADC_TEST &&
         (state == ST_ADC_TEST_SET_DDS ||
          state == ST_ADC_TEST_WAIT_ACK ||
          state == ST_ADC_TEST_SETTLE ||
@@ -240,29 +246,14 @@ module pynq_adc_system_top #(
         d2_ack_flags[1:0]          == 2'b11;
 
     // ============================================================
-    // Fake measurement computation (combinational)
-    // RC low-pass model: fc=1590Hz
+    // Disabled fake measurement placeholders
     // ============================================================
-    wire [63:0] ratio_m10;    // (freq * 10000) / 1590
-    wire [31:0] fake_theory;  // theory gain x1000
-    wire [31:0] fake_vout;    // mV
-    wire [31:0] fake_gain;    // gain x1000
-    wire [31:0] fake_error;   // error x10
-    wire [31:0] fake_phase;   // phase deg x10
-
-    assign ratio_m10 = (current_freq_hz * 64'd10000) / 64'd1590;
-
-    assign fake_theory =
-        (ratio_m10 < 64'd5000)  ? (32'd1000 - (ratio_m10 * ratio_m10 / 64'd50000)) :
-        (ratio_m10 < 64'd20000) ? (32'd900 - ((ratio_m10 - 64'd5000) * 64'd400 / 64'd15000)) :
-        (32'd5000000 / ratio_m10);
-
-    assign fake_vout  = (32'd1000 * fake_theory / 32'd1000) + ({27'd0, point_index[4:0]} % 32'd7);
-    assign fake_gain  = (fake_vout * 32'd1000) / (32'd995 + {27'd0, point_index[4:0]});
-    assign fake_error = (fake_gain > fake_theory) ?
-        ((fake_gain - fake_theory) * 32'd100 / fake_theory) :
-        ((fake_theory - fake_gain) * 32'd100 / fake_theory);
-    assign fake_phase = (ratio_m10 * 32'd900) / (32'd1000 + ratio_m10);
+    wire [63:0] ratio_m10    = 64'd0;
+    wire [31:0] fake_theory  = 32'd0;
+    wire [31:0] fake_vout    = 32'd0;
+    wire [31:0] fake_gain    = 32'd0;
+    wire [31:0] fake_error   = 32'd0;
+    wire [31:0] fake_phase   = 32'd0;
 
     integer ii;
 
@@ -425,8 +416,8 @@ module pynq_adc_system_top #(
             stat_theory_gain <= 32'd0;
             stat_error_x10 <= 32'd0;
             stat_phase_deg_x10 <= 32'd0;
-            stat_filter_type <= 32'd1;
-            stat_cutoff_freq <= 32'd1590;
+            stat_filter_type <= 32'd0;
+            stat_cutoff_freq <= 32'd0;
             stat_link_ok <= 32'd1;
             spi_b_timeout <= 32'd0;
             dds_ack_retry_count <= 2'd0;
@@ -474,13 +465,17 @@ module pynq_adc_system_top #(
                         cmd_start_flag <= 1'b0;
                     end
                     CMD_ADC_TEST_START: begin
-                        cmd_adc_test_start_flag <= 1'b1;
-                        cmd_adc_test_stop_flag <= 1'b0;
-                        cmd_start_flag <= 1'b0;
+                        if (ENABLE_LEGACY_ADC_TEST) begin
+                            cmd_adc_test_start_flag <= 1'b1;
+                            cmd_adc_test_stop_flag <= 1'b0;
+                            cmd_start_flag <= 1'b0;
+                        end
                     end
                     CMD_ADC_TEST_STOP: begin
-                        cmd_adc_test_stop_flag <= 1'b1;
-                        cmd_adc_test_start_flag <= 1'b0;
+                        if (ENABLE_LEGACY_ADC_TEST) begin
+                            cmd_adc_test_stop_flag <= 1'b1;
+                            cmd_adc_test_start_flag <= 1'b0;
+                        end
                     end
                     CMD_SET_MODE:        config_mode <= esp_arg0;
                     CMD_SET_START_FREQ:  config_start_freq <= esp_arg0;
@@ -499,7 +494,7 @@ module pynq_adc_system_top #(
                     if (cmd_start_flag) begin
                         cmd_start_flag <= 1'b0;
                         state <= ST_START_SCAN;
-                    end else if (cmd_adc_test_start_flag) begin
+                    end else if (ENABLE_LEGACY_ADC_TEST && cmd_adc_test_start_flag) begin
                         cmd_adc_test_start_flag <= 1'b0;
                         current_freq_hz <= ADC_TEST_DDS_FREQ_HZ;
                         point_index <= 32'd1;
@@ -600,19 +595,18 @@ module pynq_adc_system_top #(
                         stat_point_index <= point_index;
                         stat_vin_mv <= {20'd0, adc_a_vpp_raw};
                         stat_vout_mv <= {20'd0, adc_b_vpp_raw};
-                        stat_gain_x1000 <= (adc_a_vpp_raw != 12'd0) ?
-                            (({20'd0, adc_b_vpp_raw} * 32'd1000) / {20'd0, adc_a_vpp_raw}) :
-                            32'd0;
+                        stat_gain_x1000 <= 32'd0;
                         stat_theory_gain <= 32'd0;
                         stat_error_x10 <= 32'd0;
                         stat_phase_deg_x10 <= 32'd0;
-                        stat_filter_type <= 32'd1;
-                        stat_cutoff_freq <= 32'd1590;
+                        stat_filter_type <= 32'd0;
+                        stat_cutoff_freq <= 32'd0;
                         stat_progress <= (point_index * 32'd1000) / total_points;
                         adc_wave_seq <= adc_wave_seq + 32'd1;
                         adc_result_measured_freq_hz <= current_freq_hz;
-                        adc_result_amp_peak_raw <= {20'd0, adc_a_vpp_raw} >> 1;
-                        adc_result_amp_rms_raw <= {20'd0, adc_b_vpp_raw} >> 1;
+                        // Current baseline sends raw Vpp code. ESP32 converts to mV/gain.
+                        adc_result_amp_peak_raw <= {20'd0, adc_a_vpp_raw};
+                        adc_result_amp_rms_raw <= {20'd0, adc_b_vpp_raw};
                         adc_result_phase_deg_x10 <= 32'sd0;
                         adc_result_flags <= ADC_WAVE_FLAGS_VALID |
                                             ADC_WAVE_FLAGS_DONE |
@@ -650,13 +644,13 @@ module pynq_adc_system_top #(
                 ST_DONE: begin
                     stat_state <= STATE_DONE;
                     stat_progress <= 32'd1000;
-                    stat_cutoff_freq <= 32'd1590;
-                    stat_filter_type <= 32'd1;
+                    stat_cutoff_freq <= 32'd0;
+                    stat_filter_type <= 32'd0;
                     // Stay in DONE until new START
                     if (cmd_start_flag) begin
                         cmd_start_flag <= 1'b0;
                         state <= ST_START_SCAN;
-                    end else if (cmd_adc_test_start_flag) begin
+                    end else if (ENABLE_LEGACY_ADC_TEST && cmd_adc_test_start_flag) begin
                         cmd_adc_test_start_flag <= 1'b0;
                         current_freq_hz <= ADC_TEST_DDS_FREQ_HZ;
                         point_index <= 32'd1;
@@ -800,13 +794,11 @@ module pynq_adc_system_top #(
                                             ((adc_a_min_raw == 12'd0 || adc_a_max_raw == 12'd4095) ? ADC_WAVE_FLAGS_CLIP : 32'd0);
                         adc_result_raw_rms <= adc_a_sum_raw / ADC_A_SAMPLE_COUNT;
                         adc_result_measured_freq_hz <= ADC_TEST_DDS_FREQ_HZ;
-                        adc_result_amp_peak_raw <= {20'd0, adc_a_vpp_raw} >> 1;
-                        adc_result_amp_rms_raw <= {20'd0, adc_b_vpp_raw} >> 1;
+                        adc_result_amp_peak_raw <= {20'd0, adc_a_vpp_raw};
+                        adc_result_amp_rms_raw <= {20'd0, adc_b_vpp_raw};
                         adc_result_phase_deg_x10 <= 32'sd0;
                         adc_result_zero_cross_count <= 32'd3;
-                        stat_gain_x1000 <= (adc_a_vpp_raw != 12'd0) ?
-                            (({20'd0, adc_b_vpp_raw} * 32'd1000) / {20'd0, adc_a_vpp_raw}) :
-                            32'd0;
+                        stat_gain_x1000 <= 32'd0;
                         stat_phase_deg_x10 <= 32'd0;
                         stat_progress <= 32'd700;
                         adc_capture_started <= 1'b0;
@@ -1058,17 +1050,19 @@ module pynq_adc_system_top #(
                 state <= ST_STOP;
             end
 
-            if (cmd_adc_test_stop_flag) begin
+            if (ENABLE_LEGACY_ADC_TEST && cmd_adc_test_stop_flag) begin
                 cmd_adc_test_stop_flag <= 1'b0;
                 adc_wave_send_active <= 1'b0;
                 adc_wave_chunk_index <= 32'd0;
                 state <= ST_STOP;
+            end else if (!ENABLE_LEGACY_ADC_TEST && cmd_adc_test_stop_flag) begin
+                cmd_adc_test_stop_flag <= 1'b0;
             end
 
             if (spi_a_done && adc_result_send_active)
                 adc_result_send_active <= 1'b0;
 
-            if (spi_a_done && spi_a_tx_was_wave && adc_wave_send_active) begin
+            if (ENABLE_RAW_WAVE_TX && spi_a_done && spi_a_tx_was_wave && adc_wave_send_active) begin
                 if (adc_wave_chunk_index >= (ADC_WAVE_CHUNK_COUNT - 1)) begin
                     adc_wave_chunk_index <= 32'd0;
                     adc_wave_send_active <= 1'b0;
@@ -1118,7 +1112,8 @@ module pynq_adc_system_top #(
     reg [31:0] adc_wave_chunk_gap_cnt = 32'd0;
     reg        spi_a_start = 1'b0;
     wire       adc_result_tx_pending = adc_result_send_active;
-    wire       adc_wave_tx_pending = 1'b0;
+    wire       adc_wave_tx_pending = ENABLE_RAW_WAVE_TX && adc_wave_send_active &&
+                                     (state == ST_ADC_TEST_SEND_WAVE);
     wire [1023:0] spi_a_tx_frame;
 
     always @(posedge clk_125m) begin
@@ -1206,8 +1201,21 @@ module pynq_adc_system_top #(
     // 0x12 frame_0x12_reg and 0x13 frame_0x13_reg are built in
     // ST_ADC_TEST_PREP_WAVE_CHUNK / ST_ADC_TEST_PREP_RESULT.
 
-    // 0x13 point result frame. Payload fields are raw ADC codes; ESP32 converts
-    // code units to volts/gain display units.
+    // 0x13 point result frame, 128-byte SPI transaction:
+    // byte 0=A5, 1=5A, 2=13, 3=112
+    // byte 4  seq u32 LE
+    // byte 8  point_index u32 LE, 1-based in this PYNQADC implementation
+    // byte 12 total_points u32 LE
+    // byte 16 freq_req_hz u32 LE
+    // byte 20 freq_actual_hz u32 LE
+    // byte 24 amp_a_code u32 LE, current raw-Vpp baseline mirrors raw_a_vpp_code
+    // byte 28 amp_b_code u32 LE, current raw-Vpp baseline mirrors raw_b_vpp_code
+    // byte 32 raw_a_vpp_code u32 LE
+    // byte 36 raw_b_vpp_code u32 LE
+    // byte 40 gain_x1000 i32 LE, current baseline 0; ESP32 computes gain
+    // byte 44 phase_deg_x10 i32 LE, current baseline 0 until DFT/CORDIC stage
+    // byte 48 flags u32 LE
+    // byte 52..115 reserved 0, byte 116 checksum xor(frame[0..115]), 117..127 padding 0
     reg [1023:0] frame_0x13_live;
     reg [7:0] f13_chk;
     integer f13_i;
@@ -1259,10 +1267,10 @@ module pynq_adc_system_top #(
         frame_0x13_live[36*8 +: 8] = adc_b_vpp_raw[7:0];
         frame_0x13_live[37*8 +: 8] = adc_b_vpp_raw[11:8];
 
-        frame_0x13_live[40*8 +: 8] = stat_gain_x1000[7:0];
-        frame_0x13_live[41*8 +: 8] = stat_gain_x1000[15:8];
-        frame_0x13_live[42*8 +: 8] = stat_gain_x1000[23:16];
-        frame_0x13_live[43*8 +: 8] = stat_gain_x1000[31:24];
+        frame_0x13_live[40*8 +: 8] = 8'd0;
+        frame_0x13_live[41*8 +: 8] = 8'd0;
+        frame_0x13_live[42*8 +: 8] = 8'd0;
+        frame_0x13_live[43*8 +: 8] = 8'd0;
 
         frame_0x13_live[44*8 +: 8] = adc_result_phase_deg_x10[7:0];
         frame_0x13_live[45*8 +: 8] = adc_result_phase_deg_x10[15:8];
@@ -1357,8 +1365,8 @@ module pynq_adc_system_top #(
             spi_b_start <= 1'b0;
             if ((state == ST_SEND_DDS_FREQ ||
                  state == ST_WAIT_DDS_ACK ||
-                 state == ST_ADC_TEST_SET_DDS ||
-                 state == ST_ADC_TEST_WAIT_ACK ||
+                 (ENABLE_LEGACY_ADC_TEST && state == ST_ADC_TEST_SET_DDS) ||
+                 (ENABLE_LEGACY_ADC_TEST && state == ST_ADC_TEST_WAIT_ACK) ||
                  state == ST_STOP) &&
                 !spi_b_request_in_progress && !spi_b_busy) begin
                 spi_b_start <= 1'b1;
@@ -1441,7 +1449,8 @@ module pynq_adc_system_top #(
     end
 
     assign spi_b_tx_frame =
-        (state == ST_WAIT_DDS_ACK || state == ST_ADC_TEST_WAIT_ACK) ?
+        (state == ST_WAIT_DDS_ACK ||
+         (ENABLE_LEGACY_ADC_TEST && state == ST_ADC_TEST_WAIT_ACK)) ?
         frame_d1_nop : frame_d1;
 
     spi_master_128b #(.CLK_DIV_HALF(SPI_B_CLK_DIV_HALF)) u_spi_b (
