@@ -2,7 +2,7 @@ module pynq_adc_system_top #(
     parameter integer SPI_A_CLK_DIV_HALF  = 625,       // 125MHz/(2*625)=100kHz
     parameter integer SPI_A_PERIOD_CLKS   = 12500000,   // 100ms poll period
     parameter integer SPI_B_CLK_DIV_HALF  = 2500,       // 125MHz/(2*2500)=25kHz
-    parameter integer SETTLE_CLKS         = 12500000,   // 100ms settle
+    parameter integer SETTLE_CLKS         = 125000,     // 1ms settle
     parameter integer DDS_ACK_TIMEOUT_CLKS = 37500000   // 300ms timeout
 ) (
     input  wire clk_125m,
@@ -307,9 +307,18 @@ module pynq_adc_system_top #(
         end else if (current_freq_hz < 32'd20000) begin
             sync_samples_per_cycle_m = 32'd128;
             sync_phase_step_cfg = 12'd32;
-        end else begin
+        end else if (current_freq_hz < 32'd100000) begin
             sync_samples_per_cycle_m = 32'd64;
             sync_phase_step_cfg = 12'd64;
+        end else if (current_freq_hz < 32'd250000) begin
+            sync_samples_per_cycle_m = 32'd32;
+            sync_phase_step_cfg = 12'd128;
+        end else if (current_freq_hz < 32'd500000) begin
+            sync_samples_per_cycle_m = 32'd16;
+            sync_phase_step_cfg = 12'd256;
+        end else begin
+            sync_samples_per_cycle_m = 32'd8;
+            sync_phase_step_cfg = 12'd512;
         end
 
         adc_cfg_denom =
