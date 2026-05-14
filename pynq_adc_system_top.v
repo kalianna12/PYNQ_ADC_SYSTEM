@@ -1,4 +1,3 @@
-`include "adv_h0_bypass_core.v"
 
 module pynq_adc_system_top #(
     parameter integer SPI_A_CLK_DIV_HALF  = 7,        // 125MHz/(2*63)=992kHz
