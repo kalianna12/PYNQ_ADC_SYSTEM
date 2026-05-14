@@ -263,8 +263,6 @@ module pynq_adc_system_top #(
     wire [31:0] fake_error   = 32'd0;
     wire [31:0] fake_phase   = 32'd0;
 
-    integer ii;
-
     // ============================================================
     // AD9226 A/B dual-channel capture block
     // ============================================================
@@ -407,7 +405,7 @@ module pynq_adc_system_top #(
     wire signed [31:0] adc_sync_phase_diff_raw;
     wire [31:0] adc_sync_debug_flags;
 
-    reg [15:0] adc_sample_ram [0:ADC_A_SAMPLE_COUNT-1];
+    (* ram_style = "block" *) reg [15:0] adc_sample_ram [0:ADC_A_SAMPLE_COUNT-1];
     reg [31:0] adc_wave_seq = 32'd0;
     reg [31:0] adc_wave_chunk_index = 32'd0;
     reg        adc_wave_send_active = 1'b0;
@@ -588,10 +586,7 @@ module pynq_adc_system_top #(
     );
 
     always @(posedge clk_125m) begin
-        if (rst) begin
-            for (ii = 0; ii < ADC_A_SAMPLE_COUNT; ii = ii + 1)
-                adc_sample_ram[ii] <= 16'd0;
-        end else if (adc_sample_valid && adc_sample_index < ADC_A_SAMPLE_COUNT) begin
+        if (adc_sample_valid && adc_sample_index < ADC_A_SAMPLE_COUNT) begin
             if (ADC_WAVE_RAW_DEBUG)
                 adc_sample_ram[adc_sample_index] <= {4'd0, adc_a_sample_raw};
             else

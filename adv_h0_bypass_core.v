@@ -1,8 +1,8 @@
 `timescale 1ns / 1ps
 
 // Advanced-stage debug core:
-// capture ADC CHB y(t) -> xfft_1024_fwd -> H0 bypass X[k]=Y[k]
-// -> xfft_1024_inv -> recon RAM. It also packs 0x15 waveform chunks
+// capture ADC CHB y(t) -> shared xfft -> H0 bypass X[k]=Y[k]
+// -> shared xfft inverse -> recon RAM. It also packs 0x15 waveform chunks
 // for the existing 128-byte SPI-A transport.
 module adv_h0_bypass_core #(
     parameter integer FFT_N = 1024,
@@ -47,8 +47,10 @@ module adv_h0_bypass_core #(
     output reg  [31:0] tlast_unexpected_count
 );
 
-    localparam [15:0] FFT_CONFIG_FWD = 16'h0557;
-    localparam [15:0] FFT_CONFIG_INV = 16'h0556;
+    // xfft_0xfft_1024_shared config: bit 0 = FWD/INV, bits 20:1 = scale schedule.
+    // Use the generated IP demo's default 1024-point radix-2 scaling schedule.
+    localparam [23:0] FFT_CONFIG_FWD = 24'h0AAAAD;
+    localparam [23:0] FFT_CONFIG_INV = 24'h0AAAAC;
     localparam [31:0] WAVE_FLAGS_DONE  = 32'h00000002;
     localparam [31:0] WAVE_FLAGS_VALID = 32'h00000004;
     localparam [31:0] WAVE_FLAGS_RAW   = 32'h00000008;
@@ -130,45 +132,28 @@ module adv_h0_bypass_core #(
     reg [9:0] out_index;
     reg signed [47:0] recon_sum_next;
 
-    reg [15:0] fwd_cfg_tdata;
-    reg        fwd_cfg_tvalid;
-    wire       fwd_cfg_tready;
-    reg [31:0] fwd_s_tdata;
-    reg        fwd_s_tvalid;
-    wire       fwd_s_tready;
-    reg        fwd_s_tlast;
-    wire [31:0] fwd_m_tdata;
-    wire [7:0]  fwd_m_tuser;
-    wire        fwd_m_tvalid;
-    wire        fwd_m_tlast;
-    wire [7:0]  fwd_status_tdata;
-    wire        fwd_status_tvalid;
-    wire        fwd_event_frame_started;
-    wire        fwd_event_tlast_unexpected;
-    wire        fwd_event_tlast_missing;
-    wire        fwd_event_fft_overflow;
-    wire        fwd_event_data_in_channel_halt;
+    reg [23:0] fft_cfg_tdata;
+    reg        fft_cfg_tvalid;
+    wire       fft_cfg_tready;
+    reg [31:0] fft_s_tdata;
+    reg        fft_s_tvalid;
+    wire       fft_s_tready;
+    reg        fft_s_tlast;
+    wire [31:0] fft_m_tdata;
+    wire [7:0]  fft_m_tuser;
+    wire        fft_m_tvalid;
+    wire        fft_m_tlast;
+    wire [7:0]  fft_status_tdata;
+    wire        fft_status_tvalid;
+    wire        fft_event_frame_started;
+    wire        fft_event_tlast_unexpected;
+    wire        fft_event_tlast_missing;
+    wire        fft_event_fft_overflow;
+    wire        fft_event_status_channel_halt;
+    wire        fft_event_data_in_channel_halt;
+    wire        fft_event_data_out_channel_halt;
 
-    reg [15:0] inv_cfg_tdata;
-    reg        inv_cfg_tvalid;
-    wire       inv_cfg_tready;
-    reg [31:0] inv_s_tdata;
-    reg        inv_s_tvalid;
-    wire       inv_s_tready;
-    reg        inv_s_tlast;
-    wire [31:0] inv_m_tdata;
-    wire [7:0]  inv_m_tuser;
-    wire        inv_m_tvalid;
-    wire        inv_m_tlast;
-    wire [7:0]  inv_status_tdata;
-    wire        inv_status_tvalid;
-    wire        inv_event_frame_started;
-    wire        inv_event_tlast_unexpected;
-    wire        inv_event_tlast_missing;
-    wire        inv_event_fft_overflow;
-    wire        inv_event_data_in_channel_halt;
-
-    wire signed [15:0] ifft_real = inv_m_tdata[15:0];
+    wire signed [15:0] ifft_real = fft_m_tdata[15:0];
     wire signed [31:0] ifft_real_scaled = {{11{ifft_real[15]}}, ifft_real, 5'b00000};
 
     function signed [15:0] sat16;
@@ -186,50 +171,31 @@ module adv_h0_bypass_core #(
     wire signed [15:0] ifft_sample_sat = sat16(ifft_real_scaled);
     wire signed [31:0] ifft_sample_q31 = {{16{ifft_sample_sat[15]}}, ifft_sample_sat};
 
-    xfft_1024_fwd u_adv_xfft_fwd (
+    xfft_0xfft_1024_shared u_adv_xfft_shared (
         .aclk(clk),
         .aresetn(~rst),
-        .s_axis_config_tdata(fwd_cfg_tdata),
-        .s_axis_config_tvalid(fwd_cfg_tvalid),
-        .s_axis_config_tready(fwd_cfg_tready),
-        .s_axis_data_tdata(fwd_s_tdata),
-        .s_axis_data_tvalid(fwd_s_tvalid),
-        .s_axis_data_tready(fwd_s_tready),
-        .s_axis_data_tlast(fwd_s_tlast),
-        .m_axis_data_tdata(fwd_m_tdata),
-        .m_axis_data_tuser(fwd_m_tuser),
-        .m_axis_data_tvalid(fwd_m_tvalid),
-        .m_axis_data_tlast(fwd_m_tlast),
-        .m_axis_status_tdata(fwd_status_tdata),
-        .m_axis_status_tvalid(fwd_status_tvalid),
-        .event_frame_started(fwd_event_frame_started),
-        .event_tlast_unexpected(fwd_event_tlast_unexpected),
-        .event_tlast_missing(fwd_event_tlast_missing),
-        .event_fft_overflow(fwd_event_fft_overflow),
-        .event_data_in_channel_halt(fwd_event_data_in_channel_halt)
-    );
-
-    xfft_1024_inv u_adv_xfft_inv (
-        .aclk(clk),
-        .aresetn(~rst),
-        .s_axis_config_tdata(inv_cfg_tdata),
-        .s_axis_config_tvalid(inv_cfg_tvalid),
-        .s_axis_config_tready(inv_cfg_tready),
-        .s_axis_data_tdata(inv_s_tdata),
-        .s_axis_data_tvalid(inv_s_tvalid),
-        .s_axis_data_tready(inv_s_tready),
-        .s_axis_data_tlast(inv_s_tlast),
-        .m_axis_data_tdata(inv_m_tdata),
-        .m_axis_data_tuser(inv_m_tuser),
-        .m_axis_data_tvalid(inv_m_tvalid),
-        .m_axis_data_tlast(inv_m_tlast),
-        .m_axis_status_tdata(inv_status_tdata),
-        .m_axis_status_tvalid(inv_status_tvalid),
-        .event_frame_started(inv_event_frame_started),
-        .event_tlast_unexpected(inv_event_tlast_unexpected),
-        .event_tlast_missing(inv_event_tlast_missing),
-        .event_fft_overflow(inv_event_fft_overflow),
-        .event_data_in_channel_halt(inv_event_data_in_channel_halt)
+        .s_axis_config_tdata(fft_cfg_tdata),
+        .s_axis_config_tvalid(fft_cfg_tvalid),
+        .s_axis_config_tready(fft_cfg_tready),
+        .s_axis_data_tdata(fft_s_tdata),
+        .s_axis_data_tvalid(fft_s_tvalid),
+        .s_axis_data_tready(fft_s_tready),
+        .s_axis_data_tlast(fft_s_tlast),
+        .m_axis_data_tdata(fft_m_tdata),
+        .m_axis_data_tuser(fft_m_tuser),
+        .m_axis_data_tvalid(fft_m_tvalid),
+        .m_axis_data_tready(1'b1),
+        .m_axis_data_tlast(fft_m_tlast),
+        .m_axis_status_tdata(fft_status_tdata),
+        .m_axis_status_tvalid(fft_status_tvalid),
+        .m_axis_status_tready(1'b1),
+        .event_frame_started(fft_event_frame_started),
+        .event_tlast_unexpected(fft_event_tlast_unexpected),
+        .event_tlast_missing(fft_event_tlast_missing),
+        .event_fft_overflow(fft_event_fft_overflow),
+        .event_status_channel_halt(fft_event_status_channel_halt),
+        .event_data_in_channel_halt(fft_event_data_in_channel_halt),
+        .event_data_out_channel_halt(fft_event_data_out_channel_halt)
     );
 
     always @(posedge clk) begin
@@ -251,31 +217,25 @@ module adv_h0_bypass_core #(
             ifft_overflow_count <= 32'd0;
             tlast_missing_count <= 32'd0;
             tlast_unexpected_count <= 32'd0;
-            fwd_cfg_tdata <= 16'd0;
-            fwd_cfg_tvalid <= 1'b0;
-            fwd_s_tdata <= 32'd0;
-            fwd_s_tvalid <= 1'b0;
-            fwd_s_tlast <= 1'b0;
-            inv_cfg_tdata <= 16'd0;
-            inv_cfg_tvalid <= 1'b0;
-            inv_s_tdata <= 32'd0;
-            inv_s_tvalid <= 1'b0;
-            inv_s_tlast <= 1'b0;
+            fft_cfg_tdata <= 24'd0;
+            fft_cfg_tvalid <= 1'b0;
+            fft_s_tdata <= 32'd0;
+            fft_s_tvalid <= 1'b0;
+            fft_s_tlast <= 1'b0;
         end else begin
-            fwd_cfg_tvalid <= 1'b0;
-            fwd_s_tvalid <= 1'b0;
-            fwd_s_tlast <= 1'b0;
-            inv_cfg_tvalid <= 1'b0;
-            inv_s_tvalid <= 1'b0;
-            inv_s_tlast <= 1'b0;
+            fft_cfg_tvalid <= 1'b0;
+            fft_s_tvalid <= 1'b0;
+            fft_s_tlast <= 1'b0;
 
-            if (fwd_event_fft_overflow)
-                fft_overflow_count <= fft_overflow_count + 32'd1;
-            if (inv_event_fft_overflow)
-                ifft_overflow_count <= ifft_overflow_count + 32'd1;
-            if (fwd_event_tlast_missing || inv_event_tlast_missing)
+            if (fft_event_fft_overflow) begin
+                if (r_state == R_CFG_INV || r_state == R_FEED_INV || r_state == R_WAIT_INV)
+                    ifft_overflow_count <= ifft_overflow_count + 32'd1;
+                else
+                    fft_overflow_count <= fft_overflow_count + 32'd1;
+            end
+            if (fft_event_tlast_missing)
                 tlast_missing_count <= tlast_missing_count + 32'd1;
-            if (fwd_event_tlast_unexpected || inv_event_tlast_unexpected)
+            if (fft_event_tlast_unexpected)
                 tlast_unexpected_count <= tlast_unexpected_count + 32'd1;
 
             case (r_state)
@@ -289,51 +249,51 @@ module adv_h0_bypass_core #(
                         feed_index <= 10'd0;
                         out_index <= 10'd0;
                         status_flags <= WAVE_FLAGS_VALID | WAVE_FLAGS_H0;
-                        fwd_cfg_tdata <= FFT_CONFIG_FWD;
+                        fft_cfg_tdata <= FFT_CONFIG_FWD;
                         r_state <= R_CFG_FWD;
                     end
                 end
 
                 R_CFG_FWD: begin
                     busy <= 1'b1;
-                    fwd_cfg_tdata <= FFT_CONFIG_FWD;
-                    fwd_cfg_tvalid <= 1'b1;
-                    if (fwd_cfg_tvalid && fwd_cfg_tready) begin
-                        fwd_cfg_tvalid <= 1'b0;
+                    fft_cfg_tdata <= FFT_CONFIG_FWD;
+                    fft_cfg_tvalid <= 1'b1;
+                    if (fft_cfg_tvalid && fft_cfg_tready) begin
+                        fft_cfg_tvalid <= 1'b0;
                         feed_index <= 10'd0;
-                        fwd_s_tdata <= {16'sd0, capture_ram[10'd0]};
-                        fwd_s_tvalid <= 1'b1;
-                        fwd_s_tlast <= (FFT_N == 1);
+                        fft_s_tdata <= {16'sd0, capture_ram[10'd0]};
+                        fft_s_tvalid <= 1'b1;
+                        fft_s_tlast <= (FFT_N == 1);
                         r_state <= R_FEED_FWD;
                     end
                 end
 
                 R_FEED_FWD: begin
                     busy <= 1'b1;
-                    fwd_s_tdata <= {16'sd0, capture_ram[feed_index]};
-                    fwd_s_tvalid <= 1'b1;
-                    fwd_s_tlast <= (feed_index == FFT_N - 1);
-                    if (fwd_s_tvalid && fwd_s_tready) begin
+                    fft_s_tdata <= {16'sd0, capture_ram[feed_index]};
+                    fft_s_tvalid <= 1'b1;
+                    fft_s_tlast <= (feed_index == FFT_N - 1);
+                    if (fft_s_tvalid && fft_s_tready) begin
                         if (feed_index == FFT_N - 1) begin
-                            fwd_s_tvalid <= 1'b0;
-                            fwd_s_tlast <= 1'b0;
+                            fft_s_tvalid <= 1'b0;
+                            fft_s_tlast <= 1'b0;
                             out_index <= 10'd0;
                             r_state <= R_WAIT_FWD;
                         end else begin
                             feed_index <= feed_index + 10'd1;
-                            fwd_s_tdata <= {16'sd0, capture_ram[feed_index + 10'd1]};
-                            fwd_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
+                            fft_s_tdata <= {16'sd0, capture_ram[feed_index + 10'd1]};
+                            fft_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
                         end
                     end
                 end
 
                 R_WAIT_FWD: begin
                     busy <= 1'b1;
-                    if (fwd_m_tvalid) begin
-                        spectrum_ram[out_index] <= fwd_m_tdata;
-                        if (out_index == FFT_N - 1 || fwd_m_tlast) begin
+                    if (fft_m_tvalid) begin
+                        spectrum_ram[out_index] <= fft_m_tdata;
+                        if (out_index == FFT_N - 1 || fft_m_tlast) begin
                             feed_index <= 10'd0;
-                            inv_cfg_tdata <= FFT_CONFIG_INV;
+                            fft_cfg_tdata <= FFT_CONFIG_INV;
                             r_state <= R_CFG_INV;
                         end else begin
                             out_index <= out_index + 10'd1;
@@ -343,44 +303,44 @@ module adv_h0_bypass_core #(
 
                 R_CFG_INV: begin
                     busy <= 1'b1;
-                    inv_cfg_tdata <= FFT_CONFIG_INV;
-                    inv_cfg_tvalid <= 1'b1;
-                    if (inv_cfg_tvalid && inv_cfg_tready) begin
-                        inv_cfg_tvalid <= 1'b0;
+                    fft_cfg_tdata <= FFT_CONFIG_INV;
+                    fft_cfg_tvalid <= 1'b1;
+                    if (fft_cfg_tvalid && fft_cfg_tready) begin
+                        fft_cfg_tvalid <= 1'b0;
                         feed_index <= 10'd0;
                         out_index <= 10'd0;
                         x_sum_acc <= 48'sd0;
                         x_min <= 32'sd0;
                         x_max <= 32'sd0;
-                        inv_s_tdata <= spectrum_ram[10'd0];
-                        inv_s_tvalid <= 1'b1;
-                        inv_s_tlast <= (FFT_N == 1);
+                        fft_s_tdata <= spectrum_ram[10'd0];
+                        fft_s_tvalid <= 1'b1;
+                        fft_s_tlast <= (FFT_N == 1);
                         r_state <= R_FEED_INV;
                     end
                 end
 
                 R_FEED_INV: begin
                     busy <= 1'b1;
-                    inv_s_tdata <= spectrum_ram[feed_index];
-                    inv_s_tvalid <= 1'b1;
-                    inv_s_tlast <= (feed_index == FFT_N - 1);
-                    if (inv_s_tvalid && inv_s_tready) begin
+                    fft_s_tdata <= spectrum_ram[feed_index];
+                    fft_s_tvalid <= 1'b1;
+                    fft_s_tlast <= (feed_index == FFT_N - 1);
+                    if (fft_s_tvalid && fft_s_tready) begin
                         if (feed_index == FFT_N - 1) begin
-                            inv_s_tvalid <= 1'b0;
-                            inv_s_tlast <= 1'b0;
+                            fft_s_tvalid <= 1'b0;
+                            fft_s_tlast <= 1'b0;
                             out_index <= 10'd0;
                             r_state <= R_WAIT_INV;
                         end else begin
                             feed_index <= feed_index + 10'd1;
-                            inv_s_tdata <= spectrum_ram[feed_index + 10'd1];
-                            inv_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
+                            fft_s_tdata <= spectrum_ram[feed_index + 10'd1];
+                            fft_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
                         end
                     end
                 end
 
                 R_WAIT_INV: begin
                     busy <= 1'b1;
-                    if (inv_m_tvalid) begin
+                    if (fft_m_tvalid) begin
                         recon_ram[out_index] <= ifft_sample_sat;
                         recon_sum_next = x_sum_acc + {{32{ifft_sample_sat[15]}}, ifft_sample_sat};
                         x_sum_acc <= recon_sum_next;
@@ -393,7 +353,7 @@ module adv_h0_bypass_core #(
                             if (ifft_sample_q31 > x_max)
                                 x_max <= ifft_sample_q31;
                         end
-                        if (out_index == FFT_N - 1 || inv_m_tlast) begin
+                        if (out_index == FFT_N - 1 || fft_m_tlast) begin
                             x_vpp <= x_max - x_min;
                             x_mean <= recon_sum_next / 48'sd1024;
                             recon_done <= 1'b1;
