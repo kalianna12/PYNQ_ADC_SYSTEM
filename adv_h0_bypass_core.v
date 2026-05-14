@@ -24,8 +24,10 @@ module adv_h0_bypass_core #(
     input  wire [31:0] frame_seq,
     input  wire [31:0] frame_wave_type,   // 0=output y(t), 1=reconstructed x(t)
     input  wire [31:0] frame_chunk_index,
+    input  wire        frame_prepare_start,
     output wire [31:0] frame_chunk_count,
     output reg  [1023:0] wave_frame,
+    output reg         frame_ready,
 
     output reg  capture_done,
     output reg  recon_done,
@@ -60,7 +62,7 @@ module adv_h0_bypass_core #(
 
     (* ram_style = "distributed" *) reg signed [15:0] capture_ram [0:FFT_N-1];
     (* ram_style = "distributed" *) reg signed [15:0] recon_ram [0:FFT_N-1];
-    (* ram_style = "block" *) reg [31:0] spectrum_ram [0:FFT_N-1];
+    (* ram_style = "distributed" *) reg [31:0] spectrum_ram [0:FFT_N-1];
 
     wire signed [12:0] sample_b_centered = $signed({1'b0, sample_b_raw}) - 13'sd2048;
     wire signed [15:0] sample_b_q15 = {sample_b_centered, 3'b000};
@@ -379,18 +381,20 @@ module adv_h0_bypass_core #(
         end
     endfunction
 
-    function [15:0] sample_for_frame;
-        input [31:0] wave_type;
-        input integer sample_idx;
+    function [7:0] xor32_bytes;
+        input [31:0] v;
         begin
-            if (sample_idx >= FFT_N)
-                sample_for_frame = 16'd0;
-            else if (wave_type == 32'd1)
-                sample_for_frame = recon_ram[sample_idx[9:0]];
-            else
-                sample_for_frame = capture_ram[sample_idx[9:0]];
+            xor32_bytes = v[7:0] ^ v[15:8] ^ v[23:16] ^ v[31:24];
         end
     endfunction
+
+    wire [31:0] frame_start_index_now = frame_chunk_index * SAMPLES_PER_CHUNK;
+    wire [31:0] frame_flags_now = WAVE_FLAGS_VALID | WAVE_FLAGS_RAW | WAVE_FLAGS_H0 |
+                                  ((frame_chunk_index >= (frame_chunk_count - 1)) ? WAVE_FLAGS_DONE : 32'd0);
+    wire signed [31:0] frame_min_now = (frame_wave_type == 32'd1) ? x_min : y_min;
+    wire signed [31:0] frame_max_now = (frame_wave_type == 32'd1) ? x_max : y_max;
+    wire signed [31:0] frame_mean_now = (frame_wave_type == 32'd1) ? x_mean : y_mean;
+    wire signed [31:0] frame_vpp_now = (frame_wave_type == 32'd1) ? x_vpp : y_vpp;
 
     reg [31:0] frame_start_index;
     reg [31:0] frame_flags;
@@ -400,49 +404,93 @@ module adv_h0_bypass_core #(
     reg signed [31:0] frame_vpp;
     reg [7:0] frame_chk;
     reg [15:0] frame_sample;
+    reg [31:0] frame_sample_addr;
+    reg [5:0] frame_sample_index;
+    reg frame_prep_active;
     integer frame_i;
-    integer sample_i;
 
-    always @* begin
-        wave_frame = 1024'd0;
-        frame_start_index = frame_chunk_index * SAMPLES_PER_CHUNK;
-        frame_flags = WAVE_FLAGS_VALID | WAVE_FLAGS_RAW | WAVE_FLAGS_H0 |
-                      ((frame_chunk_index >= (frame_chunk_count - 1)) ? WAVE_FLAGS_DONE : 32'd0);
-        frame_min = (frame_wave_type == 32'd1) ? x_min : y_min;
-        frame_max = (frame_wave_type == 32'd1) ? x_max : y_max;
-        frame_mean = (frame_wave_type == 32'd1) ? x_mean : y_mean;
-        frame_vpp = (frame_wave_type == 32'd1) ? x_vpp : y_vpp;
+    always @(posedge clk) begin
+        if (rst) begin
+            wave_frame <= 1024'd0;
+            frame_ready <= 1'b0;
+            frame_prep_active <= 1'b0;
+            frame_sample_index <= 6'd0;
+            frame_start_index <= 32'd0;
+            frame_flags <= 32'd0;
+            frame_min <= 32'sd0;
+            frame_max <= 32'sd0;
+            frame_mean <= 32'sd0;
+            frame_vpp <= 32'sd0;
+            frame_chk <= 8'd0;
+            frame_sample <= 16'd0;
+            frame_sample_addr <= 32'd0;
+        end else begin
+            if (frame_prepare_start) begin
+                wave_frame <= 1024'd0;
+                frame_ready <= 1'b0;
+                frame_prep_active <= 1'b1;
+                frame_sample_index <= 6'd0;
+                frame_start_index <= frame_start_index_now;
+                frame_flags <= frame_flags_now;
+                frame_min <= frame_min_now;
+                frame_max <= frame_max_now;
+                frame_mean <= frame_mean_now;
+                frame_vpp <= frame_vpp_now;
 
-        wave_frame[0*8 +: 8] = 8'hA5;
-        wave_frame[1*8 +: 8] = 8'h5A;
-        wave_frame[2*8 +: 8] = 8'h15;
-        wave_frame[3*8 +: 8] = 8'd112;
+                wave_frame[0*8 +: 8] <= 8'hA5;
+                wave_frame[1*8 +: 8] <= 8'h5A;
+                wave_frame[2*8 +: 8] <= 8'h15;
+                wave_frame[3*8 +: 8] <= 8'd112;
 
-        for (frame_i = 0; frame_i < 4; frame_i = frame_i + 1) begin
-            wave_frame[(4  + frame_i)*8 +: 8] = get_byte32(frame_seq, frame_i);
-            wave_frame[(8  + frame_i)*8 +: 8] = get_byte32(frame_wave_type, frame_i);
-            wave_frame[(12 + frame_i)*8 +: 8] = get_byte32(frame_chunk_index, frame_i);
-            wave_frame[(16 + frame_i)*8 +: 8] = get_byte32(frame_chunk_count, frame_i);
-            wave_frame[(20 + frame_i)*8 +: 8] = get_byte32(SAMPLE_RATE_HZ, frame_i);
-            wave_frame[(24 + frame_i)*8 +: 8] = get_byte32(FFT_N, frame_i);
-            wave_frame[(28 + frame_i)*8 +: 8] = get_byte32(frame_start_index, frame_i);
-            wave_frame[(32 + frame_i)*8 +: 8] = get_byte32(frame_min, frame_i);
-            wave_frame[(36 + frame_i)*8 +: 8] = get_byte32(frame_max, frame_i);
-            wave_frame[(40 + frame_i)*8 +: 8] = get_byte32(frame_mean, frame_i);
-            wave_frame[(44 + frame_i)*8 +: 8] = get_byte32(frame_vpp, frame_i);
-            wave_frame[(48 + frame_i)*8 +: 8] = get_byte32(frame_flags, frame_i);
+                for (frame_i = 0; frame_i < 4; frame_i = frame_i + 1) begin
+                    wave_frame[(4  + frame_i)*8 +: 8] <= get_byte32(frame_seq, frame_i);
+                    wave_frame[(8  + frame_i)*8 +: 8] <= get_byte32(frame_wave_type, frame_i);
+                    wave_frame[(12 + frame_i)*8 +: 8] <= get_byte32(frame_chunk_index, frame_i);
+                    wave_frame[(16 + frame_i)*8 +: 8] <= get_byte32(frame_chunk_count, frame_i);
+                    wave_frame[(20 + frame_i)*8 +: 8] <= get_byte32(SAMPLE_RATE_HZ, frame_i);
+                    wave_frame[(24 + frame_i)*8 +: 8] <= get_byte32(FFT_N, frame_i);
+                    wave_frame[(28 + frame_i)*8 +: 8] <= get_byte32(frame_start_index_now, frame_i);
+                    wave_frame[(32 + frame_i)*8 +: 8] <= get_byte32(frame_min_now, frame_i);
+                    wave_frame[(36 + frame_i)*8 +: 8] <= get_byte32(frame_max_now, frame_i);
+                    wave_frame[(40 + frame_i)*8 +: 8] <= get_byte32(frame_mean_now, frame_i);
+                    wave_frame[(44 + frame_i)*8 +: 8] <= get_byte32(frame_vpp_now, frame_i);
+                    wave_frame[(48 + frame_i)*8 +: 8] <= get_byte32(frame_flags_now, frame_i);
+                end
+
+                frame_chk <= 8'hA5 ^ 8'h5A ^ 8'h15 ^ 8'd112 ^
+                             xor32_bytes(frame_seq) ^
+                             xor32_bytes(frame_wave_type) ^
+                             xor32_bytes(frame_chunk_index) ^
+                             xor32_bytes(frame_chunk_count) ^
+                             xor32_bytes(SAMPLE_RATE_HZ) ^
+                             xor32_bytes(FFT_N) ^
+                             xor32_bytes(frame_start_index_now) ^
+                             xor32_bytes(frame_min_now) ^
+                             xor32_bytes(frame_max_now) ^
+                             xor32_bytes(frame_mean_now) ^
+                             xor32_bytes(frame_vpp_now) ^
+                             xor32_bytes(frame_flags_now);
+            end else if (frame_prep_active) begin
+                if (frame_sample_index < SAMPLES_PER_CHUNK) begin
+                    frame_sample_addr = frame_start_index + frame_sample_index;
+                    if (frame_sample_addr >= FFT_N)
+                        frame_sample = 16'd0;
+                    else if (frame_wave_type == 32'd1)
+                        frame_sample = recon_ram[frame_sample_addr[9:0]];
+                    else
+                        frame_sample = capture_ram[frame_sample_addr[9:0]];
+
+                    wave_frame[(52 + frame_sample_index*2)*8 +: 8] <= frame_sample[7:0];
+                    wave_frame[(53 + frame_sample_index*2)*8 +: 8] <= frame_sample[15:8];
+                    frame_chk <= frame_chk ^ frame_sample[7:0] ^ frame_sample[15:8];
+                    frame_sample_index <= frame_sample_index + 6'd1;
+                end else begin
+                    wave_frame[116*8 +: 8] <= frame_chk;
+                    frame_ready <= 1'b1;
+                    frame_prep_active <= 1'b0;
+                end
+            end
         end
-
-        for (sample_i = 0; sample_i < SAMPLES_PER_CHUNK; sample_i = sample_i + 1) begin
-            frame_sample = sample_for_frame(frame_wave_type, frame_start_index + sample_i);
-            wave_frame[(52 + sample_i*2)*8 +: 8] = frame_sample[7:0];
-            wave_frame[(53 + sample_i*2)*8 +: 8] = frame_sample[15:8];
-        end
-
-        frame_chk = 8'd0;
-        for (frame_i = 0; frame_i < 116; frame_i = frame_i + 1)
-            frame_chk = frame_chk ^ wave_frame[frame_i*8 +: 8];
-        wave_frame[116*8 +: 8] = frame_chk;
     end
 
 endmodule
