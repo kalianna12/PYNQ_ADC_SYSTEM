@@ -1,6 +1,6 @@
 module pynq_adc_system_top #(
-    parameter integer SPI_A_CLK_DIV_HALF  = 625,       // 125MHz/(2*625)=100kHz
-    parameter integer SPI_A_PERIOD_CLKS   = 12500000,   // 100ms poll period
+    parameter integer SPI_A_CLK_DIV_HALF  = 63,        // 125MHz/(2*63)=992kHz
+    parameter integer SPI_A_PERIOD_CLKS   = 250000,    // 2ms poll period at 125MHz; stable systems may use 125000 for 1ms
     parameter integer SPI_B_CLK_DIV_HALF  = 2500,       // 125MHz/(2*2500)=25kHz
     parameter integer SETTLE_CLKS         = 1250000,    // 10ms settle
     parameter integer DDS_ACK_TIMEOUT_CLKS = 37500000   // 300ms timeout
@@ -1231,7 +1231,7 @@ module pynq_adc_system_top #(
     end
 
     // ============================================================
-    // SPI-A to ESP32-P4 (periodic, 100ms)
+    // SPI-A to ESP32-P4 (periodic, about 2ms)
     // ============================================================
     reg [31:0] spi_a_period_cnt = 32'd0;
     reg [31:0] adc_wave_chunk_gap_cnt = 32'd0;
