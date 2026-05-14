@@ -56,9 +56,9 @@ module adv_h0_bypass_core #(
 
     assign frame_chunk_count = (FFT_N + SAMPLES_PER_CHUNK - 1) / SAMPLES_PER_CHUNK;
 
-    reg signed [15:0] capture_ram [0:FFT_N-1];
-    reg signed [15:0] recon_ram [0:FFT_N-1];
-    reg [31:0] spectrum_ram [0:FFT_N-1];
+    (* ram_style = "distributed" *) reg signed [15:0] capture_ram [0:FFT_N-1];
+    (* ram_style = "distributed" *) reg signed [15:0] recon_ram [0:FFT_N-1];
+    (* ram_style = "block" *) reg [31:0] spectrum_ram [0:FFT_N-1];
 
     wire signed [12:0] sample_b_centered = $signed({1'b0, sample_b_raw}) - 13'sd2048;
     wire signed [15:0] sample_b_q15 = {sample_b_centered, 3'b000};
@@ -68,7 +68,6 @@ module adv_h0_bypass_core #(
     reg signed [47:0] y_sum_acc;
     reg signed [47:0] x_sum_acc;
 
-    integer init_i;
     always @(posedge clk) begin
         if (rst) begin
             capture_done <= 1'b0;
@@ -79,11 +78,6 @@ module adv_h0_bypass_core #(
             y_mean <= 32'sd0;
             y_vpp <= 32'sd0;
             capture_done_count <= 32'd0;
-            for (init_i = 0; init_i < FFT_N; init_i = init_i + 1) begin
-                capture_ram[init_i] <= 16'sd0;
-                recon_ram[init_i] <= 16'sd0;
-                spectrum_ram[init_i] <= 32'd0;
-            end
         end else begin
             if (capture_clear) begin
                 capture_done <= 1'b0;
