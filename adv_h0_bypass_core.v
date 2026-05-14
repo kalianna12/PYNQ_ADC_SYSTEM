@@ -60,9 +60,9 @@ module adv_h0_bypass_core #(
 
     assign frame_chunk_count = (FFT_N + SAMPLES_PER_CHUNK - 1) / SAMPLES_PER_CHUNK;
 
-    (* ram_style = "distributed" *) reg signed [15:0] capture_ram [0:FFT_N-1];
+    (* ram_style = "block" *) reg signed [15:0] capture_ram [0:FFT_N-1];
     (* ram_style = "distributed" *) reg signed [15:0] recon_ram [0:FFT_N-1];
-    (* ram_style = "distributed" *) reg [31:0] spectrum_ram [0:FFT_N-1];
+    (* ram_style = "block" *) reg [31:0] spectrum_ram [0:FFT_N-1];
 
     wire signed [12:0] sample_b_centered = $signed({1'b0, sample_b_raw}) - 13'sd2048;
     wire signed [15:0] sample_b_q15 = {sample_b_centered, 3'b000};
@@ -71,6 +71,14 @@ module adv_h0_bypass_core #(
     reg [15:0] cap_count;
     reg signed [47:0] y_sum_acc;
     reg signed [47:0] x_sum_acc;
+    reg frame_prep_active;
+    reg [9:0] capture_fft_rd_addr;
+    reg [9:0] capture_frame_rd_addr;
+    wire [9:0] capture_rd_addr = (frame_prep_active || frame_prepare_start) ?
+                                  capture_frame_rd_addr : capture_fft_rd_addr;
+    reg signed [15:0] capture_rd_data;
+    reg [9:0] spectrum_rd_addr;
+    reg [31:0] spectrum_rd_data;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -82,7 +90,10 @@ module adv_h0_bypass_core #(
             y_mean <= 32'sd0;
             y_vpp <= 32'sd0;
             capture_done_count <= 32'd0;
+            capture_rd_data <= 16'sd0;
         end else begin
+            capture_rd_data <= capture_ram[capture_rd_addr];
+
             if (capture_clear) begin
                 capture_done <= 1'b0;
                 cap_count <= 16'd0;
@@ -129,6 +140,8 @@ module adv_h0_bypass_core #(
     localparam [3:0] R_CFG_INV  = 4'd4;
     localparam [3:0] R_FEED_INV = 4'd5;
     localparam [3:0] R_WAIT_INV = 4'd6;
+    localparam [3:0] R_PRIME_FWD = 4'd7;
+    localparam [3:0] R_PRIME_INV = 4'd8;
 
     reg [9:0] feed_index;
     reg [9:0] out_index;
@@ -224,7 +237,13 @@ module adv_h0_bypass_core #(
             fft_s_tdata <= 32'd0;
             fft_s_tvalid <= 1'b0;
             fft_s_tlast <= 1'b0;
+            capture_fft_rd_addr <= 10'd0;
+            capture_frame_rd_addr <= 10'd0;
+            spectrum_rd_addr <= 10'd0;
+            spectrum_rd_data <= 32'd0;
         end else begin
+            spectrum_rd_data <= spectrum_ram[spectrum_rd_addr];
+
             fft_cfg_tvalid <= 1'b0;
             fft_s_tvalid <= 1'b0;
             fft_s_tlast <= 1'b0;
@@ -252,6 +271,7 @@ module adv_h0_bypass_core #(
                         out_index <= 10'd0;
                         status_flags <= WAVE_FLAGS_VALID | WAVE_FLAGS_H0;
                         fft_cfg_tdata <= FFT_CONFIG_FWD;
+                        capture_fft_rd_addr <= 10'd0;
                         r_state <= R_CFG_FWD;
                     end
                 end
@@ -263,16 +283,20 @@ module adv_h0_bypass_core #(
                     if (fft_cfg_tvalid && fft_cfg_tready) begin
                         fft_cfg_tvalid <= 1'b0;
                         feed_index <= 10'd0;
-                        fft_s_tdata <= {16'sd0, capture_ram[10'd0]};
-                        fft_s_tvalid <= 1'b1;
-                        fft_s_tlast <= (FFT_N == 1);
-                        r_state <= R_FEED_FWD;
+                        capture_fft_rd_addr <= 10'd0;
+                        r_state <= R_PRIME_FWD;
                     end
+                end
+
+                R_PRIME_FWD: begin
+                    busy <= 1'b1;
+                    capture_fft_rd_addr <= 10'd1;
+                    r_state <= R_FEED_FWD;
                 end
 
                 R_FEED_FWD: begin
                     busy <= 1'b1;
-                    fft_s_tdata <= {16'sd0, capture_ram[feed_index]};
+                    fft_s_tdata <= {16'sd0, capture_rd_data};
                     fft_s_tvalid <= 1'b1;
                     fft_s_tlast <= (feed_index == FFT_N - 1);
                     if (fft_s_tvalid && fft_s_tready) begin
@@ -283,7 +307,8 @@ module adv_h0_bypass_core #(
                             r_state <= R_WAIT_FWD;
                         end else begin
                             feed_index <= feed_index + 10'd1;
-                            fft_s_tdata <= {16'sd0, capture_ram[feed_index + 10'd1]};
+                            capture_fft_rd_addr <= feed_index + 10'd2;
+                            fft_s_tdata <= {16'sd0, capture_rd_data};
                             fft_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
                         end
                     end
@@ -296,6 +321,7 @@ module adv_h0_bypass_core #(
                         if (out_index == FFT_N - 1 || fft_m_tlast) begin
                             feed_index <= 10'd0;
                             fft_cfg_tdata <= FFT_CONFIG_INV;
+                            spectrum_rd_addr <= 10'd0;
                             r_state <= R_CFG_INV;
                         end else begin
                             out_index <= out_index + 10'd1;
@@ -314,16 +340,20 @@ module adv_h0_bypass_core #(
                         x_sum_acc <= 48'sd0;
                         x_min <= 32'sd0;
                         x_max <= 32'sd0;
-                        fft_s_tdata <= spectrum_ram[10'd0];
-                        fft_s_tvalid <= 1'b1;
-                        fft_s_tlast <= (FFT_N == 1);
-                        r_state <= R_FEED_INV;
+                        spectrum_rd_addr <= 10'd0;
+                        r_state <= R_PRIME_INV;
                     end
+                end
+
+                R_PRIME_INV: begin
+                    busy <= 1'b1;
+                    spectrum_rd_addr <= 10'd1;
+                    r_state <= R_FEED_INV;
                 end
 
                 R_FEED_INV: begin
                     busy <= 1'b1;
-                    fft_s_tdata <= spectrum_ram[feed_index];
+                    fft_s_tdata <= spectrum_rd_data;
                     fft_s_tvalid <= 1'b1;
                     fft_s_tlast <= (feed_index == FFT_N - 1);
                     if (fft_s_tvalid && fft_s_tready) begin
@@ -334,7 +364,8 @@ module adv_h0_bypass_core #(
                             r_state <= R_WAIT_INV;
                         end else begin
                             feed_index <= feed_index + 10'd1;
-                            fft_s_tdata <= spectrum_ram[feed_index + 10'd1];
+                            spectrum_rd_addr <= feed_index + 10'd2;
+                            fft_s_tdata <= spectrum_rd_data;
                             fft_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
                         end
                     end
@@ -406,7 +437,7 @@ module adv_h0_bypass_core #(
     reg [15:0] frame_sample;
     reg [31:0] frame_sample_addr;
     reg [5:0] frame_sample_index;
-    reg frame_prep_active;
+    reg frame_sample_valid;
     integer frame_i;
 
     always @(posedge clk) begin
@@ -424,18 +455,22 @@ module adv_h0_bypass_core #(
             frame_chk <= 8'd0;
             frame_sample <= 16'd0;
             frame_sample_addr <= 32'd0;
+            frame_sample_valid <= 1'b0;
         end else begin
             if (frame_prepare_start) begin
                 wave_frame <= 1024'd0;
                 frame_ready <= 1'b0;
                 frame_prep_active <= 1'b1;
                 frame_sample_index <= 6'd0;
+                frame_sample_valid <= 1'b0;
                 frame_start_index <= frame_start_index_now;
                 frame_flags <= frame_flags_now;
                 frame_min <= frame_min_now;
                 frame_max <= frame_max_now;
                 frame_mean <= frame_mean_now;
                 frame_vpp <= frame_vpp_now;
+                if (frame_wave_type == 32'd0)
+                    capture_frame_rd_addr <= frame_start_index_now[9:0];
 
                 wave_frame[0*8 +: 8] <= 8'hA5;
                 wave_frame[1*8 +: 8] <= 8'h5A;
@@ -471,15 +506,21 @@ module adv_h0_bypass_core #(
                              xor32_bytes(frame_vpp_now) ^
                              xor32_bytes(frame_flags_now);
             end else if (frame_prep_active) begin
-                if (frame_sample_index < SAMPLES_PER_CHUNK) begin
+                if (!frame_sample_valid) begin
+                    if (frame_wave_type == 32'd0)
+                        capture_frame_rd_addr <= frame_start_index[9:0] + 10'd1;
+                    frame_sample_valid <= 1'b1;
+                end else if (frame_sample_index < SAMPLES_PER_CHUNK) begin
                     frame_sample_addr = frame_start_index + frame_sample_index;
                     if (frame_sample_addr >= FFT_N)
                         frame_sample = 16'd0;
                     else if (frame_wave_type == 32'd1)
                         frame_sample = recon_ram[frame_sample_addr[9:0]];
                     else
-                        frame_sample = capture_ram[frame_sample_addr[9:0]];
+                        frame_sample = capture_rd_data;
 
+                    if (frame_wave_type == 32'd0)
+                        capture_frame_rd_addr <= frame_start_index[9:0] + frame_sample_index[5:0] + 10'd2;
                     wave_frame[(52 + frame_sample_index*2)*8 +: 8] <= frame_sample[7:0];
                     wave_frame[(53 + frame_sample_index*2)*8 +: 8] <= frame_sample[15:8];
                     frame_chk <= frame_chk ^ frame_sample[7:0] ^ frame_sample[15:8];
@@ -488,6 +529,7 @@ module adv_h0_bypass_core #(
                     wave_frame[116*8 +: 8] <= frame_chk;
                     frame_ready <= 1'b1;
                     frame_prep_active <= 1'b0;
+                    frame_sample_valid <= 1'b0;
                 end
             end
         end
