@@ -304,23 +304,31 @@ module adv_h0_bypass_core #(
                     busy <= 1'b1;
                     fwd_cfg_tdata <= FFT_CONFIG_FWD;
                     fwd_cfg_tvalid <= 1'b1;
-                    if (fwd_cfg_tready) begin
+                    if (fwd_cfg_tvalid && fwd_cfg_tready) begin
+                        fwd_cfg_tvalid <= 1'b0;
                         feed_index <= 10'd0;
+                        fwd_s_tdata <= {16'sd0, capture_ram[10'd0]};
+                        fwd_s_tvalid <= 1'b1;
+                        fwd_s_tlast <= (FFT_N == 1);
                         r_state <= R_FEED_FWD;
                     end
                 end
 
                 R_FEED_FWD: begin
                     busy <= 1'b1;
-                    if (fwd_s_tready) begin
-                        fwd_s_tdata <= {16'sd0, capture_ram[feed_index]};
-                        fwd_s_tvalid <= 1'b1;
-                        fwd_s_tlast <= (feed_index == FFT_N - 1);
+                    fwd_s_tdata <= {16'sd0, capture_ram[feed_index]};
+                    fwd_s_tvalid <= 1'b1;
+                    fwd_s_tlast <= (feed_index == FFT_N - 1);
+                    if (fwd_s_tvalid && fwd_s_tready) begin
                         if (feed_index == FFT_N - 1) begin
+                            fwd_s_tvalid <= 1'b0;
+                            fwd_s_tlast <= 1'b0;
                             out_index <= 10'd0;
                             r_state <= R_WAIT_FWD;
                         end else begin
                             feed_index <= feed_index + 10'd1;
+                            fwd_s_tdata <= {16'sd0, capture_ram[feed_index + 10'd1]};
+                            fwd_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
                         end
                     end
                 end
@@ -343,27 +351,35 @@ module adv_h0_bypass_core #(
                     busy <= 1'b1;
                     inv_cfg_tdata <= FFT_CONFIG_INV;
                     inv_cfg_tvalid <= 1'b1;
-                    if (inv_cfg_tready) begin
+                    if (inv_cfg_tvalid && inv_cfg_tready) begin
+                        inv_cfg_tvalid <= 1'b0;
                         feed_index <= 10'd0;
                         out_index <= 10'd0;
                         x_sum_acc <= 48'sd0;
                         x_min <= 32'sd0;
                         x_max <= 32'sd0;
+                        inv_s_tdata <= spectrum_ram[10'd0];
+                        inv_s_tvalid <= 1'b1;
+                        inv_s_tlast <= (FFT_N == 1);
                         r_state <= R_FEED_INV;
                     end
                 end
 
                 R_FEED_INV: begin
                     busy <= 1'b1;
-                    if (inv_s_tready) begin
-                        inv_s_tdata <= spectrum_ram[feed_index];
-                        inv_s_tvalid <= 1'b1;
-                        inv_s_tlast <= (feed_index == FFT_N - 1);
+                    inv_s_tdata <= spectrum_ram[feed_index];
+                    inv_s_tvalid <= 1'b1;
+                    inv_s_tlast <= (feed_index == FFT_N - 1);
+                    if (inv_s_tvalid && inv_s_tready) begin
                         if (feed_index == FFT_N - 1) begin
+                            inv_s_tvalid <= 1'b0;
+                            inv_s_tlast <= 1'b0;
                             out_index <= 10'd0;
                             r_state <= R_WAIT_INV;
                         end else begin
                             feed_index <= feed_index + 10'd1;
+                            inv_s_tdata <= spectrum_ram[feed_index + 10'd1];
+                            inv_s_tlast <= (feed_index + 10'd1 == FFT_N - 1);
                         end
                     end
                 end
